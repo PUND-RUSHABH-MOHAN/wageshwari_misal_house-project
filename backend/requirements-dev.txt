@@ -1,0 +1,4 @@
+# Test-only dependencies. The Lambda runtime already ships boto3, so nothing is bundled.
+boto3>=1.40
+moto[cognitoidp,dynamodb]>=5.1
+pytest>=8

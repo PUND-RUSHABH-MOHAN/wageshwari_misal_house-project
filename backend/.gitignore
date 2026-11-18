@@ -1,0 +1,16 @@
+# Terraform working files (state lives in S3, never locally)
+terraform/.terraform/
+terraform/.build/
+terraform/tfplan
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/crash.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Old SAM build output, if a local copy is ever merged in
+.aws-sam/
