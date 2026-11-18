@@ -18,8 +18,16 @@ import { AppProvider, useApp } from '@/context/AppContext';
 SplashScreen.preventAutoHideAsync();
 
 function RootNavigator() {
-  const { currentUser } = useApp();
+  const { currentUser, authReady } = useApp();
   const isLoggedIn = currentUser !== null;
+
+  // Keep the native splash up until the saved session has been checked, so a logged-in
+  // user never sees the login screen flash.
+  useEffect(() => {
+    if (authReady) SplashScreen.hideAsync();
+  }, [authReady]);
+
+  if (!authReady) return null;
 
   return (
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: Colors.background } }}>
@@ -29,6 +37,9 @@ function RootNavigator() {
       </Stack.Protected>
       <Stack.Protected guard={!isLoggedIn}>
         <Stack.Screen name="login" />
+        <Stack.Screen name="signup" />
+        <Stack.Screen name="confirm" />
+        <Stack.Screen name="forgot" />
       </Stack.Protected>
     </Stack>
   );
@@ -44,11 +55,8 @@ export default function RootLayout() {
   });
   const ready = fontsLoaded || fontError !== null;
 
-  useEffect(() => {
-    if (ready) SplashScreen.hideAsync();
-  }, [ready]);
-
   // Keep the native splash up until fonts are ready (falls back to system font on error).
+  // RootNavigator hides it once the session check is done too.
   if (!ready) return null;
 
   return (

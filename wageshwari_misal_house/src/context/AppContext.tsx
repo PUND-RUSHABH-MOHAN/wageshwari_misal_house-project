@@ -1,11 +1,11 @@
 /**
  * Global client-side store (React Context + useReducer).
  *
- * Every action here maps to a future API call; the comment on each action
- * names the endpoint it will be replaced by. State shapes are the DB types
- * from `@/types`, so swapping mock reducers for fetch results is mechanical.
+ * Auth and the profile talk to the real backend (src/services/api.ts + session.ts).
+ * Catalog, addresses and orders are still local mock data: each action's comment
+ * names the endpoint it will be replaced by (roadmap parts 3–5).
  */
-import { createContext, useContext, useEffect, useReducer, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
 
 import {
   buildSeedOrders,
@@ -14,6 +14,21 @@ import {
   MOCK_USER,
   PRODUCTS,
 } from '@/data/mock-data';
+import {
+  authApi,
+  isApiError,
+  meApi,
+  type CodeDelivery,
+  type MePatch,
+  type RegisterInput,
+} from '@/services/api';
+import {
+  clearSession,
+  restoreSession,
+  setSessionExpiredHandler,
+  startSession,
+  withAuth,
+} from '@/services/session';
 import type {
   Address,
   AddressInput,
@@ -21,7 +36,6 @@ import type {
   CartItem,
   Category,
   ID,
-  LoginInput,
   Order,
   OrderItem,
   OrderStatus,
@@ -37,6 +51,10 @@ import { computeBill } from '@/utils/pricing';
 // State
 // ---------------------------------------------------------------------------
 interface AppState {
+  /** False until the stored session (if any) has been checked at startup. */
+  authReady: boolean;
+  /** Shown on the login screen when the saved session couldn't be checked (e.g. offline). */
+  restoreError: string | null;
   currentUser: User | null;
   categories: Category[];
   products: Product[];
@@ -52,6 +70,8 @@ interface AppState {
 }
 
 const initialState: AppState = {
+  authReady: false,
+  restoreError: null,
   currentUser: null,
   categories: CATEGORIES,
   products: PRODUCTS,
@@ -64,6 +84,7 @@ const initialState: AppState = {
 };
 
 type Action =
+  | { type: 'AUTH_READY'; user: User | null; restoreError?: string }
   | { type: 'LOGIN'; user: User }
   | { type: 'LOGOUT' }
   | { type: 'ADD_TO_CART'; item: CartItem }
@@ -75,7 +96,7 @@ type Action =
   | { type: 'ADVANCE_LIVE_ORDERS' }
   | { type: 'CANCEL_ORDER'; id: ID }
   | { type: 'DISMISS_ORDER_BANNER' }
-  | { type: 'UPDATE_USER'; patch: Partial<Pick<User, 'name' | 'phone' | 'email'>> }
+  | { type: 'SET_USER'; user: User }
   | { type: 'UPSERT_ADDRESS'; address: Address }
   | { type: 'DELETE_ADDRESS'; id: ID }
   | { type: 'SET_DEFAULT_ADDRESS'; id: ID }
@@ -138,9 +159,21 @@ function advanceOrder(order: Order): Order {
 // ---------------------------------------------------------------------------
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
-    case 'LOGIN': // POST /auth/login | POST /auth/otp/verify
+    case 'AUTH_READY':
       return {
         ...state,
+        authReady: true,
+        restoreError: action.restoreError ?? null,
+        currentUser: action.user,
+        selectedAddressId: action.user
+          ? (state.addresses.find((a) => a.user_id === action.user?.id && a.is_default)?.id ?? null)
+          : null,
+      };
+
+    case 'LOGIN': // POST /auth/login
+      return {
+        ...state,
+        restoreError: null,
         currentUser: action.user,
         selectedAddressId: state.addresses.find((a) => a.is_default)?.id ?? null,
       };
@@ -220,10 +253,8 @@ function reducer(state: AppState, action: Action): AppState {
     case 'DISMISS_ORDER_BANNER':
       return { ...state, lastPlacedOrderId: null };
 
-    case 'UPDATE_USER': // PATCH /me
-      return state.currentUser
-        ? { ...state, currentUser: { ...state.currentUser, ...action.patch } }
-        : state;
+    case 'SET_USER': // GET /me | PATCH /me
+      return state.currentUser ? { ...state, currentUser: action.user } : state;
 
     case 'UPSERT_ADDRESS': {
       // POST /addresses | PATCH /addresses/:id
@@ -268,6 +299,8 @@ function reducer(state: AppState, action: Action): AppState {
 // ---------------------------------------------------------------------------
 interface AppContextValue {
   // data
+  authReady: boolean;
+  restoreError: string | null;
   currentUser: User | null;
   categories: Category[];
   products: Product[];
@@ -280,10 +313,19 @@ interface AppContextValue {
   bill: BillBreakdown;
   selectedAddress: Address | null;
   defaultAddress: Address | null;
-  // auth
-  login: (input: LoginInput) => void;
-  logout: () => void;
-  updateUser: (patch: Partial<Pick<User, 'name' | 'phone' | 'email'>>) => void;
+  // auth (all throw ApiError on failure; screens show `error.message`)
+  login: (email: string, password: string) => Promise<void>;
+  /** Creates the account; the user must then confirm the emailed code. */
+  register: (input: RegisterInput) => Promise<CodeDelivery | null>;
+  /** Confirms the email. Returns true if it also logged the user in. */
+  confirmSignUp: (email: string, code: string) => Promise<boolean>;
+  resendCode: (email: string) => Promise<CodeDelivery | null>;
+  /** Remember credentials (memory only) so confirming the email can log straight in. */
+  rememberPendingLogin: (email: string, password: string) => void;
+  forgotPassword: (email: string) => Promise<void>;
+  resetPassword: (email: string, code: string, newPassword: string) => Promise<void>;
+  logout: () => Promise<void>;
+  updateUser: (patch: MePatch) => Promise<void>;
   // cart
   addToCart: (product: Product, opts?: { quantity?: number; spice_level?: SpiceLevel; note?: string }) => void;
   changeQuantity: (cartItemId: ID, delta: number) => void;
@@ -309,6 +351,42 @@ const ORDER_BANNER_MS = 8000;
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  /** Email + password from sign-up / an unconfirmed login. Never persisted. */
+  const pendingLogin = useRef<{ email: string; password: string } | null>(null);
+
+  // Startup: restore a saved session, and drop back to login if it ever expires.
+  useEffect(() => {
+    setSessionExpiredHandler(() => dispatch({ type: 'LOGOUT' }));
+    let cancelled = false;
+    (async () => {
+      try {
+        const restored = await restoreSession();
+        const user = restored === 'restored' ? await withAuth((t) => meApi.get(t)) : null;
+        if (!cancelled) dispatch({ type: 'AUTH_READY', user });
+      } catch (e) {
+        if (!cancelled) {
+          dispatch({
+            type: 'AUTH_READY',
+            user: null,
+            restoreError: isApiError(e) ? e.message : 'Could not restore your session.',
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      setSessionExpiredHandler(null);
+    };
+  }, []);
+
+  const normEmail = (email: string) => email.trim().toLowerCase();
+
+  const login = async (email: string, password: string) => {
+    const res = await authApi.login(normEmail(email), password);
+    await startSession(res);
+    pendingLogin.current = null;
+    dispatch({ type: 'LOGIN', user: res.user });
+  };
 
   const hasLiveOrders = state.liveOrderIds.length > 0;
   useEffect(() => {
@@ -352,15 +430,56 @@ export function AppProvider({ children }: { children: ReactNode }) {
     selectedAddress,
     defaultAddress,
 
-    login: (input) => {
-      const user: User =
-        input.method === 'email'
-          ? { ...MOCK_USER, email: input.email.trim().toLowerCase() }
-          : { ...MOCK_USER, phone: input.phone };
-      dispatch({ type: 'LOGIN', user });
+    authReady: state.authReady,
+    restoreError: state.restoreError,
+
+    login,
+    register: async (input) => {
+      const email = normEmail(input.email);
+      const res = await authApi.register({ ...input, email, name: input.name.trim() });
+      pendingLogin.current = { email, password: input.password };
+      return res.code_delivery;
     },
-    logout: () => dispatch({ type: 'LOGOUT' }),
-    updateUser: (patch) => dispatch({ type: 'UPDATE_USER', patch }),
+    confirmSignUp: async (email, code) => {
+      const e = normEmail(email);
+      try {
+        await authApi.confirm(e, code.trim());
+      } catch (err) {
+        // Already confirmed (e.g. confirmed earlier, then reopened the app): carry on to login.
+        if (!(isApiError(err) && err.code === 'ALREADY_CONFIRMED')) throw err;
+      }
+      const pending = pendingLogin.current;
+      if (pending && pending.email === e) {
+        try {
+          await login(pending.email, pending.password);
+          return true;
+        } catch {
+          return false; // confirmed, but auto-login failed: send them to the login screen
+        }
+      }
+      return false;
+    },
+    resendCode: async (email) => (await authApi.resendCode(normEmail(email))).code_delivery,
+    rememberPendingLogin: (email, password) => {
+      pendingLogin.current = { email: normEmail(email), password };
+    },
+    forgotPassword: async (email) => {
+      await authApi.forgotPassword(normEmail(email));
+    },
+    resetPassword: async (email, code, newPassword) => {
+      await authApi.resetPassword(normEmail(email), code.trim(), newPassword);
+    },
+    logout: async () => {
+      const token = await clearSession();
+      pendingLogin.current = null;
+      dispatch({ type: 'LOGOUT' });
+      // Revoke on the server too; if offline, the token still expires in 30 days.
+      if (token) authApi.logout(token).catch(() => undefined);
+    },
+    updateUser: async (patch) => {
+      const user = await withAuth((t) => meApi.patch(t, patch));
+      dispatch({ type: 'SET_USER', user });
+    },
 
     addToCart: (product, opts = {}) => {
       const note = opts.note?.trim() || undefined;

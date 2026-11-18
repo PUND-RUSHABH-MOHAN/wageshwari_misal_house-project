@@ -81,42 +81,29 @@ npx expo lint           # lint
 
 ### 4.1 Where are the base URL and HTTP calls?
 
-**They do not exist yet.** No API client, base URL, `fetch` or `axios` code exists in
-the project. Data flows like this today:
+| File | Role |
+|---|---|
+| `.env` | `EXPO_PUBLIC_API_BASE_URL` for `npx expo start`. Public value; committed. |
+| `eas.json` | The same variable for EAS cloud builds (`preview`, `production`). |
+| `src/services/api.ts` | The only place that calls `fetch`. One function per endpoint; every failure becomes an `ApiError` with the backend's `code` and `message`. |
+| `src/services/session.ts` | Tokens. The refresh token (30 days) is kept in the OS keystore with `expo-secure-store`; the ID token (1 hour) only in memory, renewed automatically. |
+| `src/context/AppContext.tsx` | Screens call `useApp()`. Auth and profile actions call the API; the rest is still mock data. |
 
+**Live (Part 2):** sign-up, email-code confirmation, login, remembered login across restarts,
+silent token refresh, forgot/reset password, `GET`/`PATCH /me`, logout (revokes the refresh token).
+
+**Still mock data until their backend parts land:** categories and products (part 3), addresses
+(part 4) and orders (part 5). They live in memory and reset when the app restarts.
+Phone + OTP login is removed from the login screen until part 8.
+
+### 4.2 Running against the backend
+
+```powershell
+npm install
+npx expo start --clear     # scan the QR with Expo Go, or press "a" for the Android emulator
 ```
-src/data/mock-data.ts  ──(initial state)──▶  src/context/AppContext.tsx  ──(useApp())──▶  screens
-```
 
-- **`src/context/AppContext.tsx`** is the single place where data is read and changed.
-  Every action already has a comment naming the endpoint it should call, e.g.
-  `case 'PLACE_ORDER': // POST /orders`.
-- **`src/data/mock-data.ts`** holds the seed data, already shaped like the API
-  responses. Its `CDN` constant (`https://cdn.wagheshwarmisal.in`) is only a
-  placeholder for image URLs.
-- **`src/types/index.ts`** defines every request and response model.
-
-Screens never call the network themselves. They only use the `useApp()` hook, so
-connecting the backend means changing `AppContext.tsx` only. No screen code has to
-change.
-
-### 4.2 Recommended way to connect the backend
-
-1. Put the base URL in an environment variable. Expo exposes variables prefixed with
-   `EXPO_PUBLIC_` to the app:
-   ```bash
-   # .env
-   EXPO_PUBLIC_API_BASE_URL=https://api.example.com/v1
-   ```
-2. Create one API module, e.g. `src/services/api.ts`, that reads
-   `process.env.EXPO_PUBLIC_API_BASE_URL`, adds the auth header, and has one function
-   per endpoint in the table below.
-3. In `AppContext.tsx`, load categories, products, profile, addresses and orders on
-   login instead of from `mock-data.ts`. Then replace each mock action with its API
-   function.
-4. Remove the simulated delays: `MOCK_DELAY_MS` in `src/app/login.tsx`, the
-   `setTimeout` in `handlePlaceOrder` in `src/app/(tabs)/cart.tsx`, and the mock
-   "kitchen" timer (`KITCHEN_TICK_MS`) in `AppContext.tsx`.
+Change the API URL in `.env` (and `eas.json` for cloud builds), then restart with `--clear`.
 
 ### 4.3 Endpoint map (planned endpoints, as named in the code comments)
 

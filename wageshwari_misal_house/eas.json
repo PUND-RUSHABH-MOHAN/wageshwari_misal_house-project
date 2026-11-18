@@ -7,11 +7,17 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com"
       }
     },
     "production": {
       "android": {
         "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com"
       }
     }
   }
