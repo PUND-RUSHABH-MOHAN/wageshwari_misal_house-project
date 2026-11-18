@@ -7,6 +7,7 @@ import { Icon } from '@/components/Icon';
 import { Button, Card, SectionTitle, Tag, TextLink } from '@/components/ui';
 import { Colors, Fonts, InputStyles, Radius, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
+import { errorMessage } from '@/services/api';
 import type { Address } from '@/types';
 import { formatAddress, formatPhone, isValidIndianMobile } from '@/utils/format';
 
@@ -17,6 +18,8 @@ export default function ProfileScreen() {
   const [editingPhone, setEditingPhone] = useState(false);
   const [phoneDraft, setPhoneDraft] = useState('');
   const [phoneError, setPhoneError] = useState<string | null>(null);
+  const [savingPhone, setSavingPhone] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   // `undefined` = sheet closed, `null` = adding new, Address = editing
   const [addressTarget, setAddressTarget] = useState<Address | null | undefined>(undefined);
@@ -36,13 +39,26 @@ export default function ProfileScreen() {
     setEditingPhone(true);
   };
 
-  const savePhone = () => {
+  const savePhone = async () => {
     if (!isValidIndianMobile(phoneDraft)) {
       setPhoneError('Enter a valid 10-digit mobile number starting with 6–9');
       return;
     }
-    updateUser({ phone: phoneDraft }); // PATCH /me (will trigger OTP re-verification server-side)
-    setEditingPhone(false);
+    if (savingPhone) return;
+    setSavingPhone(true);
+    try {
+      await updateUser({ phone: phoneDraft }); // PATCH /me
+      setEditingPhone(false);
+    } catch (e) {
+      setPhoneError(errorMessage(e));
+    } finally {
+      setSavingPhone(false);
+    }
+  };
+
+  const signOut = async () => {
+    setSigningOut(true);
+    await logout(); // clears the session locally; revokes the refresh token server-side
   };
 
   const sortedAddresses = [...addresses].sort((a, b) => Number(b.is_default) - Number(a.is_default));
@@ -101,13 +117,13 @@ export default function ProfileScreen() {
                 {phoneError ? <Text style={styles.error}>{phoneError}</Text> : null}
                 <View style={styles.phoneActions}>
                   <Button title="Cancel" variant="ghost" onPress={() => setEditingPhone(false)} style={styles.flex} />
-                  <Button title="Save" onPress={savePhone} style={styles.flex} />
+                  <Button title="Save" onPress={savePhone} loading={savingPhone} style={styles.flex} />
                 </View>
               </>
             ) : (
               <Text style={styles.phoneValue}>{formatPhone(currentUser.phone)}</Text>
             )}
-            <Text style={styles.phoneHint}>Used for login OTP and delivery updates from our rider.</Text>
+            <Text style={styles.phoneHint}>Used for delivery updates from our rider.</Text>
           </View>
         </Card>
 
@@ -151,7 +167,14 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        <Button title="Sign Out" icon="logout" variant="danger" onPress={logout} style={styles.signOut} />
+        <Button
+          title="Sign Out"
+          icon="logout"
+          variant="danger"
+          onPress={signOut}
+          loading={signingOut}
+          style={styles.signOut}
+        />
         <Text style={styles.version}>Wagheshwar Misal House · v1.0.0 (prototype)</Text>
       </ScrollView>
 

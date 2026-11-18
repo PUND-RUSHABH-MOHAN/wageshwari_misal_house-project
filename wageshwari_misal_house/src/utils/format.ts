@@ -90,5 +90,10 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
 
 export const isValidIndianMobile = (v: string) => /^[6-9]\d{9}$/.test(v);
 export const isValidEmail = (v: string) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.trim());
+/** Mirrors the Cognito password policy (backend/terraform/cognito.tf). */
+export const PASSWORD_RULE = 'At least 8 characters, with a lowercase letter and a number';
+export const isValidPassword = (v: string) => v.length >= 8 && /[a-z]/.test(v) && /\d/.test(v);
+/** Cognito email codes are 6 digits. */
+export const isValidEmailCode = (v: string) => /^\d{6}$/.test(v.trim());
 /** Pune pincodes are 411xxx / 412xxx / 410xxx. */
 export const isValidPunePincode = (v: string) => /^41[0-2]\d{3}$/.test(v);
