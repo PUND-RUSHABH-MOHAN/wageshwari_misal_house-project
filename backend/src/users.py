@@ -1,0 +1,111 @@
+"""User profile storage in the single DynamoDB table.
+
+Item: PK = "USER#<cognito sub>", SK = "PROFILE".
+Cognito owns identity (email, password, groups). DynamoDB owns the profile
+fields the app needs that Cognito doesn't hold for us: name and phone.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+import boto3
+
+from common import ApiError, env
+
+_table = None
+
+
+def table():
+    """Created lazily so tests can set env vars and moto mocks first."""
+    global _table
+    if _table is None:
+        _table = boto3.resource("dynamodb").Table(env("TABLE_NAME"))
+    return _table
+
+
+def reset_clients() -> None:
+    """Tests call this between cases."""
+    global _table
+    _table = None
+
+
+def _key(user_id: str) -> dict:
+    return {"PK": f"USER#{user_id}", "SK": "PROFILE"}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def to_user(item: dict, role: str) -> dict:
+    """DynamoDB item -> the app's `User` (src/types/index.ts)."""
+    return {
+        "id": item["user_id"],
+        "name": item.get("name", ""),
+        "phone": item.get("phone", ""),
+        "email": item.get("email", ""),
+        "role": role,
+        "is_active": bool(item.get("is_active", True)),
+    }
+
+
+def get_profile(user_id: str) -> dict | None:
+    return table().get_item(Key=_key(user_id)).get("Item")
+
+
+def create_profile(user_id: str, *, email: str, name: str = "", phone: str = "") -> dict:
+    """Write the profile once. If it already exists (e.g. a retried request), keep it."""
+    now = _now()
+    item = {
+        **_key(user_id),
+        "entity": "USER",
+        "user_id": user_id,
+        "email": email,
+        "name": name,
+        "phone": phone,
+        "is_active": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        table().put_item(Item=item, ConditionExpression="attribute_not_exists(PK)")
+    except table().meta.client.exceptions.ConditionalCheckFailedException:
+        existing = get_profile(user_id)
+        if existing is not None:
+            return existing
+    return item
+
+
+def get_or_create_profile(user_id: str, *, email: str) -> dict:
+    """Login / GET /me: a user created outside the API (e.g. in the console) gets an
+    empty profile on first use instead of a 404."""
+    item = get_profile(user_id)
+    if item is None:
+        item = create_profile(user_id, email=email)
+    return item
+
+
+def update_profile(user_id: str, changes: dict[str, Any], *, email: str) -> dict:
+    """Update name/phone. Creates the profile if it is missing."""
+    get_or_create_profile(user_id, email=email)
+    names = {"#u": "updated_at"}
+    values: dict[str, Any] = {":u": _now()}
+    sets = ["#u = :u"]
+    for i, (field, value) in enumerate(sorted(changes.items())):
+        names[f"#f{i}"] = field
+        values[f":v{i}"] = value
+        sets.append(f"#f{i} = :v{i}")
+    result = table().update_item(
+        Key=_key(user_id),
+        UpdateExpression="SET " + ", ".join(sets),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+        ConditionExpression="attribute_exists(PK)",
+        ReturnValues="ALL_NEW",
+    )
+    item = result.get("Attributes")
+    if item is None:
+        raise ApiError(500, "INTERNAL", "Profile update failed.")
+    return item
