@@ -4,14 +4,15 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { AddressFormModal } from '@/components/AddressFormModal';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Icon } from '@/components/Icon';
-import { Button, Tag } from '@/components/ui';
+import { Button, LoadState, Tag } from '@/components/ui';
 import { Colors, Radius, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 import { formatAddress } from '@/utils/format';
 
 /** Choose the delivery address for checkout, or add a new one inline. */
 export function AddressPickerModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const { addresses, selectedAddress, selectAddress, saveAddress, currentUser } = useApp();
+  const { addresses, selectedAddress, selectAddress, saveAddress, currentUser, addressesLoad, refreshAddresses } =
+    useApp();
   const [formOpen, setFormOpen] = useState(false);
 
   return (
@@ -29,7 +30,14 @@ export function AddressPickerModal({ visible, onClose }: { visible: boolean; onC
             onPress={() => setFormOpen(true)}
           />
         }>
-        {addresses.length === 0 ? (
+        {addresses.length === 0 && addressesLoad.status !== 'ready' ? (
+          <LoadState
+            compact
+            loading={addressesLoad.status === 'loading' || addressesLoad.status === 'idle'}
+            error={addressesLoad.error}
+            onRetry={() => void refreshAddresses()}
+          />
+        ) : addresses.length === 0 ? (
           <Text style={styles.empty}>No saved addresses yet. Add one to continue.</Text>
         ) : null}
         {addresses.map((a) => {
@@ -69,8 +77,8 @@ export function AddressPickerModal({ visible, onClose }: { visible: boolean; onC
         visible={visible && formOpen}
         defaults={{ receiver_name: currentUser?.name, receiver_phone: currentUser?.phone }}
         onClose={() => setFormOpen(false)}
-        onSave={(input) => {
-          saveAddress(input);
+        onSave={async (input) => {
+          await saveAddress(input); // throws -> the form shows the error and stays open
           setFormOpen(false);
           onClose();
         }}

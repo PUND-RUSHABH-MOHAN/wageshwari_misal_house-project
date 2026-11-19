@@ -2,7 +2,17 @@ import { Image } from 'expo-image';
 import { router, useIsFocused } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useState } from 'react';
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import {
+  FlatList,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AddressPickerModal } from '@/components/AddressPickerModal';
@@ -10,9 +20,10 @@ import { Icon } from '@/components/Icon';
 import { ProductCard } from '@/components/ProductCard';
 import { ProductDetailSheet } from '@/components/ProductDetailSheet';
 import { SpiceLevelSheet } from '@/components/SpiceLevelSheet';
+import { LoadState } from '@/components/ui';
+import { CATEGORY_FALLBACK_IMAGES, imageSources, LOGO, type BundledImage } from '@/constants/images';
 import { Colors, Fonts, InputStyles, Radius, Shadow, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
-import { CATEGORY_IMAGES, LOGO } from '@/data/mock-data';
 import type { Category, ID, Product } from '@/types';
 import { formatCurrency } from '@/utils/format';
 import { isKitchenOpen, KITCHEN_OPEN_HOUR } from '@/utils/pricing';
@@ -22,7 +33,8 @@ const ALL = 'all';
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
-  const { categories, products, cart, cartCount, bill, selectedAddress, addToCart } = useApp();
+  const { categories, products, cart, cartCount, bill, selectedAddress, addToCart, catalogLoad, refreshCatalog } =
+    useApp();
   const { width: screenWidth } = useWindowDimensions();
   const columns = screenWidth >= 1000 ? 4 : screenWidth >= 700 ? 3 : 2;
   const cardWidth = Math.floor((screenWidth - Spacing.lg * 2 - GRID_GAP * (columns - 1)) / columns);
@@ -34,6 +46,16 @@ export default function HomeScreen() {
   const [spiceQty, setSpiceQty] = useState(1);
   const [detailProduct, setDetailProduct] = useState<Product | null>(null);
   const [addressOpen, setAddressOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await refreshCatalog();
+    setRefreshing(false);
+  };
+  // First load (nothing to show yet) vs. a reload with the old menu still on screen.
+  const catalogEmpty = products.length === 0;
+  const showLoadState = catalogEmpty && catalogLoad.status !== 'ready';
 
   const open = isKitchenOpen();
   const activeCategoryIds = new Set(categories.map((c) => c.id));
@@ -121,7 +143,7 @@ export default function HomeScreen() {
         contentContainerStyle={styles.categories}>
         <CategoryBubble
           label="All"
-          image={LOGO}
+          sources={[LOGO]}
           selected={activeCategory === ALL}
           onPress={() => setActiveCategory(ALL)}
           isLogo
@@ -130,7 +152,7 @@ export default function HomeScreen() {
           <CategoryBubble
             key={c.id}
             label={c.name}
-            image={CATEGORY_IMAGES[c.id] ?? { uri: c.image_url }}
+            sources={imageSources(c.image_url, CATEGORY_FALLBACK_IMAGES[c.id])}
             selected={activeCategory === c.id}
             onPress={() => setActiveCategory((cur) => (cur === c.id ? ALL : c.id))}
           />
@@ -172,11 +194,26 @@ export default function HomeScreen() {
         ListHeaderComponent={header}
         contentContainerStyle={[styles.list, cartCount > 0 && styles.listWithBar]}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[Colors.primary]} tintColor={Colors.primary} />
+        }
         ListEmptyComponent={
-          <View style={styles.noResults}>
-            <Text style={styles.noResultsEmoji}>🔍</Text>
-            <Text style={styles.noResultsText}>No dishes found{q ? ` for “${query.trim()}”` : ''}.</Text>
-          </View>
+          showLoadState ? (
+            <LoadState
+              loading={catalogLoad.status === 'loading' || catalogLoad.status === 'idle'}
+              error={catalogLoad.error}
+              onRetry={() => void refreshCatalog()}
+            />
+          ) : (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsEmoji}>{q || !catalogEmpty ? '🔍' : '🍽️'}</Text>
+              <Text style={styles.noResultsText}>
+                {q || !catalogEmpty
+                  ? `No dishes found${q ? ` for “${query.trim()}”` : ''}.`
+                  : 'The menu is empty right now. Pull down to refresh.'}
+              </Text>
+            </View>
+          )
         }
         renderItem={({ item }) => (
           <ProductCard
@@ -247,17 +284,20 @@ export default function HomeScreen() {
 
 function CategoryBubble({
   label,
-  image,
+  sources,
   selected,
   onPress,
   isLogo,
 }: {
   label: string;
-  image: React.ComponentProps<typeof Image>['source'];
+  /** Tried in order; the next one is used if an image fails to load. */
+  sources: ({ uri: string } | BundledImage)[];
   selected: boolean;
   onPress: () => void;
   isLogo?: boolean;
 }) {
+  const [attempt, setAttempt] = useState(0);
+  const image = sources[attempt];
   return (
     <Pressable
       accessibilityRole="button"
@@ -266,11 +306,19 @@ function CategoryBubble({
       onPress={onPress}
       style={({ pressed }) => [styles.bubble, pressed && { opacity: 0.85 }]}>
       <View style={[styles.bubbleRing, selected && styles.bubbleRingActive]}>
-        <Image
-          source={image}
-          style={[styles.bubbleImg, isLogo && styles.bubbleLogo]}
-          contentFit={isLogo ? 'contain' : 'cover'}
-        />
+        {image !== undefined ? (
+          <Image
+            key={attempt}
+            source={image}
+            style={[styles.bubbleImg, isLogo && styles.bubbleLogo]}
+            contentFit={isLogo ? 'contain' : 'cover'}
+            onError={() => setAttempt((n) => n + 1)}
+          />
+        ) : (
+          <View style={[styles.bubbleImg, styles.bubblePlaceholder]}>
+            <Text style={styles.bubbleEmoji}>🍽️</Text>
+          </View>
+        )}
       </View>
       <Text style={[styles.bubbleLabel, selected && styles.bubbleLabelActive]} numberOfLines={1}>
         {label}
@@ -366,6 +414,8 @@ const styles = StyleSheet.create({
   bubbleRingActive: { borderColor: Colors.primary, borderWidth: 3 },
   bubbleImg: { flex: 1, borderRadius: BUBBLE / 2 },
   bubbleLogo: { borderRadius: 0 },
+  bubblePlaceholder: { alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.primarySoft },
+  bubbleEmoji: { fontSize: 30 },
   bubbleLabel: { fontFamily: Fonts.semibold, fontSize: 15, lineHeight: 20, color: Colors.text },
   bubbleLabelActive: { fontFamily: Fonts.bold, color: Colors.primary },
 

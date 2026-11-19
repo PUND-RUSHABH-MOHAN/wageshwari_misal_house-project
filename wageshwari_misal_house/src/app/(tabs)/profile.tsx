@@ -1,19 +1,30 @@
+import Constants from 'expo-constants';
 import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AddressFormModal } from '@/components/AddressFormModal';
 import { Icon } from '@/components/Icon';
-import { Button, Card, SectionTitle, Tag, TextLink } from '@/components/ui';
+import { Button, Card, LoadState, SectionTitle, Tag, TextLink } from '@/components/ui';
 import { Colors, Fonts, InputStyles, Radius, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 import { errorMessage } from '@/services/api';
-import type { Address } from '@/types';
+import type { Address, ID } from '@/types';
 import { formatAddress, formatPhone, isValidIndianMobile } from '@/utils/format';
 
 export default function ProfileScreen() {
-  const { currentUser, addresses, orders, updateUser, saveAddress, deleteAddress, setDefaultAddress, logout } =
-    useApp();
+  const {
+    currentUser,
+    addresses,
+    orders,
+    addressesLoad,
+    refreshAddresses,
+    updateUser,
+    saveAddress,
+    deleteAddress,
+    setDefaultAddress,
+    logout,
+  } = useApp();
 
   const [editingPhone, setEditingPhone] = useState(false);
   const [phoneDraft, setPhoneDraft] = useState('');
@@ -23,6 +34,22 @@ export default function ProfileScreen() {
 
   // `undefined` = sheet closed, `null` = adding new, Address = editing
   const [addressTarget, setAddressTarget] = useState<Address | null | undefined>(undefined);
+  /** Address with a delete / set-default request in flight. */
+  const [busyAddressId, setBusyAddressId] = useState<ID | null>(null);
+  const [addressError, setAddressError] = useState<string | null>(null);
+
+  const runAddressAction = async (id: ID, action: () => Promise<void>) => {
+    if (busyAddressId) return;
+    setAddressError(null);
+    setBusyAddressId(id);
+    try {
+      await action();
+    } catch (e) {
+      setAddressError(errorMessage(e));
+    } finally {
+      setBusyAddressId(null);
+    }
+  };
 
   if (!currentUser) return null;
 
@@ -61,6 +88,8 @@ export default function ProfileScreen() {
     await logout(); // clears the session locally; revokes the refresh token server-side
   };
 
+  const memberSince = currentUser.created_at ? new Date(currentUser.created_at).getFullYear() : null;
+
   const sortedAddresses = [...addresses].sort((a, b) => Number(b.is_default) - Number(a.is_default));
 
   return (
@@ -81,7 +110,8 @@ export default function ProfileScreen() {
                 <Text style={styles.email}>{currentUser.email}</Text>
               </View>
               <Text style={styles.ordersCount}>
-                {orders.length} order{orders.length === 1 ? '' : 's'} · Member since 2024
+                {orders.length} order{orders.length === 1 ? '' : 's'}
+                {memberSince ? ` · Member since ${memberSince}` : ''}
               </Text>
             </View>
           </View>
@@ -134,13 +164,29 @@ export default function ProfileScreen() {
             action={<TextLink title="+ Add new" onPress={() => setAddressTarget(null)} />}
           />
           <View style={styles.addressList}>
-            {sortedAddresses.length === 0 ? (
+            {addressError ? <Text style={styles.error}>{addressError}</Text> : null}
+            {sortedAddresses.length === 0 && addressesLoad.status !== 'ready' ? (
+              <Card>
+                <LoadState
+                  compact
+                  loading={addressesLoad.status === 'loading' || addressesLoad.status === 'idle'}
+                  error={addressesLoad.error}
+                  onRetry={() => void refreshAddresses()}
+                />
+              </Card>
+            ) : sortedAddresses.length === 0 ? (
               <Card>
                 <Text style={styles.muted}>No saved addresses. Add one to speed up checkout.</Text>
               </Card>
             ) : null}
             {sortedAddresses.map((a) => (
-              <Card key={a.id} style={[styles.addressCard, a.is_default && styles.addressCardDefault]}>
+              <Card
+                key={a.id}
+                style={[
+                  styles.addressCard,
+                  a.is_default && styles.addressCardDefault,
+                  busyAddressId === a.id && styles.busy,
+                ]}>
                 <View style={styles.addressHead}>
                   <View style={styles.inline}>
                     <Icon name={a.label === 'Work' ? 'bag' : a.label === 'Home' ? 'home' : 'location'} size={16} color={Colors.primary} />
@@ -156,8 +202,17 @@ export default function ProfileScreen() {
                 </Text>
                 <Text style={styles.addressText}>{formatAddress(a)}</Text>
                 <View style={styles.addressActions}>
-                  {!a.is_default ? <TextLink title="Set as default" onPress={() => setDefaultAddress(a.id)} /> : null}
-                  <Pressable onPress={() => deleteAddress(a.id)} hitSlop={8} style={styles.inline}>
+                  {!a.is_default ? (
+                    <TextLink
+                      title="Set as default"
+                      onPress={() => void runAddressAction(a.id, () => setDefaultAddress(a.id))}
+                    />
+                  ) : null}
+                  <Pressable
+                    onPress={() => void runAddressAction(a.id, () => deleteAddress(a.id))}
+                    disabled={busyAddressId !== null}
+                    hitSlop={8}
+                    style={styles.inline}>
                     <Icon name="trash" size={14} color={Colors.danger} />
                     <Text style={styles.deleteText}>Remove</Text>
                   </Pressable>
@@ -175,7 +230,7 @@ export default function ProfileScreen() {
           loading={signingOut}
           style={styles.signOut}
         />
-        <Text style={styles.version}>Wagheshwar Misal House · v1.0.0 (prototype)</Text>
+        <Text style={styles.version}>Wagheshwar Misal House · v{Constants.expoConfig?.version ?? '1.0.0'}</Text>
       </ScrollView>
 
       <AddressFormModal
@@ -184,8 +239,8 @@ export default function ProfileScreen() {
         initial={addressTarget ?? null}
         defaults={{ receiver_name: currentUser.name, receiver_phone: currentUser.phone }}
         onClose={() => setAddressTarget(undefined)}
-        onSave={(input) => {
-          saveAddress(input);
+        onSave={async (input) => {
+          await saveAddress(input); // throws -> the form shows the error and stays open
           setAddressTarget(undefined);
         }}
       />
@@ -246,6 +301,7 @@ const styles = StyleSheet.create({
   addressList: { gap: Spacing.md },
   addressCard: { gap: 6, borderWidth: 1.5, borderColor: 'transparent' },
   addressCardDefault: { borderColor: Colors.primaryBorder },
+  busy: { opacity: 0.5 },
   addressHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   addressLabel: { fontSize: 15, fontWeight: '800', color: Colors.text },
   addressReceiver: { fontSize: 13, fontWeight: '600', color: Colors.text },

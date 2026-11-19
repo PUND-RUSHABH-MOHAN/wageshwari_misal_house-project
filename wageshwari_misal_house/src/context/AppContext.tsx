@@ -1,24 +1,36 @@
 /**
  * Global client-side store (React Context + useReducer).
  *
- * Auth and the profile talk to the real backend (src/services/api.ts + session.ts).
- * Catalog, addresses and orders are still local mock data: each action's comment
- * names the endpoint it will be replaced by (roadmap parts 3–5).
+ * Everything server-owned comes from the backend (src/services/api.ts + session.ts):
+ *   auth + profile   /auth/*, /me
+ *   menu             GET /categories, GET /products
+ *   addresses        GET/POST /addresses, PATCH/DELETE /addresses/:id
+ *   orders           GET/POST /orders, POST /orders/:id/cancel (polled while any is in progress)
+ *
+ * The cart is the only local state: it lives on the device and is sent with POST /orders.
  */
-import { createContext, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useReducer,
+  useRef,
+  type ReactNode,
+} from 'react';
+import { AppState as RNAppState } from 'react-native';
 
 import {
-  buildSeedOrders,
-  CATEGORIES,
-  MOCK_ADDRESSES,
-  MOCK_USER,
-  PRODUCTS,
-} from '@/data/mock-data';
-import {
+  addressApi,
   authApi,
+  catalogApi,
+  errorMessage,
   isApiError,
   meApi,
+  orderApi,
+  type AddressBody,
   type CodeDelivery,
+  type CreateOrderInput,
   type MePatch,
   type RegisterInput,
 } from '@/services/api';
@@ -37,19 +49,30 @@ import type {
   Category,
   ID,
   Order,
-  OrderItem,
   OrderStatus,
   PlaceOrderInput,
   Product,
   SpiceLevel,
   User,
 } from '@/types';
-import { toCompactDate } from '@/utils/format';
 import { computeBill } from '@/utils/pricing';
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+/** Fetch state of one server-owned collection. */
+export interface Resource {
+  status: LoadStatus;
+  /** User-facing message when `status === 'error'`. */
+  error: string | null;
+}
+
+type ResourceKey = 'catalog' | 'addresses' | 'orders';
+
+const IDLE: Resource = { status: 'idle', error: null };
+
 interface AppState {
   /** False until the stored session (if any) has been checked at startup. */
   authReady: boolean;
@@ -61,45 +84,56 @@ interface AppState {
   addresses: Address[];
   cart: CartItem[];
   orders: Order[];
+  load: Record<ResourceKey, Resource>;
   /** Address chosen for checkout; falls back to the default address. */
   selectedAddressId: ID | null;
   /** Drives the "Order placed" banner on the Orders tab. */
   lastPlacedOrderId: ID | null;
-  /** Orders placed this session whose status the mock "kitchen" advances. */
-  liveOrderIds: ID[];
 }
 
 const initialState: AppState = {
   authReady: false,
   restoreError: null,
   currentUser: null,
-  categories: CATEGORIES,
-  products: PRODUCTS,
-  addresses: MOCK_ADDRESSES,
+  categories: [],
+  products: [],
+  addresses: [],
   cart: [],
-  orders: buildSeedOrders(),
+  orders: [],
+  load: { catalog: IDLE, addresses: IDLE, orders: IDLE },
   selectedAddressId: null,
   lastPlacedOrderId: null,
-  liveOrderIds: [],
+};
+
+/** Everything that belongs to the signed-in user; wiped on login/logout. The menu is kept. */
+const signedOutData = {
+  addresses: [] as Address[],
+  orders: [] as Order[],
+  cart: [] as CartItem[],
+  selectedAddressId: null,
+  lastPlacedOrderId: null,
 };
 
 type Action =
   | { type: 'AUTH_READY'; user: User | null; restoreError?: string }
   | { type: 'LOGIN'; user: User }
   | { type: 'LOGOUT' }
+  | { type: 'LOAD_START'; resource: ResourceKey }
+  | { type: 'LOAD_ERROR'; resource: ResourceKey; error: string }
+  | { type: 'CATALOG_LOADED'; categories: Category[]; products: Product[] }
+  | { type: 'ADDRESSES_LOADED'; addresses: Address[] }
+  | { type: 'ORDERS_LOADED'; orders: Order[] }
   | { type: 'ADD_TO_CART'; item: CartItem }
   | { type: 'CHANGE_QTY'; id: ID; delta: number }
   | { type: 'UPDATE_CART_ITEM'; id: ID; patch: Pick<CartItem, 'note' | 'spice_level'> }
   | { type: 'REMOVE_CART_ITEM'; id: ID }
   | { type: 'CLEAR_CART' }
-  | { type: 'PLACE_ORDER'; order: Order }
-  | { type: 'ADVANCE_LIVE_ORDERS' }
-  | { type: 'CANCEL_ORDER'; id: ID }
+  | { type: 'ORDER_PLACED'; order: Order }
+  | { type: 'ORDER_UPDATED'; order: Order }
   | { type: 'DISMISS_ORDER_BANNER' }
   | { type: 'SET_USER'; user: User }
-  | { type: 'UPSERT_ADDRESS'; address: Address }
-  | { type: 'DELETE_ADDRESS'; id: ID }
-  | { type: 'SET_DEFAULT_ADDRESS'; id: ID }
+  | { type: 'ADDRESS_SAVED'; address: Address; isNew: boolean }
+  | { type: 'ADDRESS_REMOVED'; id: ID }
   | { type: 'SELECT_ADDRESS'; id: ID };
 
 // ---------------------------------------------------------------------------
@@ -113,46 +147,21 @@ const sameLine = (a: CartItem, b: CartItem) =>
   a.spice_level === b.spice_level &&
   (a.note ?? '').trim() === (b.note ?? '').trim();
 
-/** Guarantees exactly one default address (if any exist). */
-function normalizeDefault(addresses: Address[], preferredId?: ID): Address[] {
-  if (addresses.length === 0) return addresses;
-  const defaultId =
-    preferredId ?? addresses.find((a) => a.is_default)?.id ?? addresses[0].id;
-  return addresses.map((a) => ({ ...a, is_default: a.id === defaultId }));
+/** FNV-1a, 32-bit. Only used to derive a stable idempotency key from a request body. */
+function hash(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
 }
 
-/** WMH-YYYYMMDD-NNNN with a per-day running sequence. */
-function nextOrderNumber(orders: Order[], date: Date): string {
-  const prefix = `WMH-${toCompactDate(date)}-`;
-  const maxSeq = orders
-    .filter((o) => o.order_number.startsWith(prefix))
-    .reduce((max, o) => Math.max(max, Number(o.order_number.slice(prefix.length)) || 0), 0);
-  return `${prefix}${String(maxSeq + 1).padStart(4, '0')}`;
-}
-
-/** Linear lifecycle used by the mock kitchen simulator. */
-export const ORDER_FLOW: OrderStatus[] = [
-  'PENDING_PAYMENT',
-  'CONFIRMED',
-  'PREPARING',
-  'OUT_FOR_DELIVERY',
-  'DELIVERED',
-];
+const byNewest = (a: Order, b: Order) => b.created_at.localeCompare(a.created_at);
 
 export const isTerminalStatus = (s: OrderStatus) => s === 'DELIVERED' || s === 'CANCELLED';
+/** Mirrors the server rule; the server has the final say (POST /orders/:id/cancel). */
 export const isCancellable = (o: Order) => o.status === 'PENDING_PAYMENT' || o.status === 'CONFIRMED';
-
-function advanceOrder(order: Order): Order {
-  if (isTerminalStatus(order.status)) return order;
-  const next = ORDER_FLOW[ORDER_FLOW.indexOf(order.status) + 1];
-  // Online: gateway success moves PENDING_PAYMENT -> CONFIRMED + paid.
-  // COD: cash collected on delivery.
-  const paid =
-    order.payment_status === 'paid' ||
-    (order.payment_method === 'online' && next === 'CONFIRMED') ||
-    next === 'DELIVERED';
-  return { ...order, status: next, payment_status: paid ? 'paid' : 'pending' };
-}
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -162,33 +171,69 @@ function reducer(state: AppState, action: Action): AppState {
     case 'AUTH_READY':
       return {
         ...state,
+        ...signedOutData,
         authReady: true,
         restoreError: action.restoreError ?? null,
         currentUser: action.user,
-        selectedAddressId: action.user
-          ? (state.addresses.find((a) => a.user_id === action.user?.id && a.is_default)?.id ?? null)
-          : null,
       };
 
-    case 'LOGIN': // POST /auth/login
-      return {
-        ...state,
-        restoreError: null,
-        currentUser: action.user,
-        selectedAddressId: state.addresses.find((a) => a.is_default)?.id ?? null,
-      };
+    case 'LOGIN':
+      return { ...state, ...signedOutData, restoreError: null, currentUser: action.user };
 
-    case 'LOGOUT': // POST /auth/logout
+    case 'LOGOUT':
       return {
         ...state,
+        ...signedOutData,
         currentUser: null,
-        cart: [],
-        selectedAddressId: null,
-        lastPlacedOrderId: null,
+        load: { ...state.load, addresses: IDLE, orders: IDLE },
+      };
+
+    case 'LOAD_START':
+      return {
+        ...state,
+        load: { ...state.load, [action.resource]: { status: 'loading', error: null } },
+      };
+
+    case 'LOAD_ERROR':
+      return {
+        ...state,
+        load: { ...state.load, [action.resource]: { status: 'error', error: action.error } },
+      };
+
+    case 'CATALOG_LOADED': {
+      // Refresh the product snapshot held by each cart line, so price and availability
+      // shown in the cart match the latest menu.
+      const fresh = new Map(action.products.map((p) => [p.id, p]));
+      return {
+        ...state,
+        categories: action.categories,
+        products: action.products,
+        cart: state.cart.map((c) => {
+          const product = fresh.get(c.product_id);
+          return product ? { ...c, product } : c;
+        }),
+        load: { ...state.load, catalog: { status: 'ready', error: null } },
+      };
+    }
+
+    case 'ADDRESSES_LOADED':
+      return {
+        ...state,
+        addresses: action.addresses,
+        selectedAddressId: action.addresses.some((a) => a.id === state.selectedAddressId)
+          ? state.selectedAddressId
+          : null,
+        load: { ...state.load, addresses: { status: 'ready', error: null } },
+      };
+
+    case 'ORDERS_LOADED':
+      return {
+        ...state,
+        orders: [...action.orders].sort(byNewest),
+        load: { ...state.load, orders: { status: 'ready', error: null } },
       };
 
     case 'ADD_TO_CART': {
-      // Cart is client-only in v1; becomes POST /cart/items when server carts exist.
       const existing = state.cart.find((c) => sameLine(c, action.item));
       if (existing) {
         return {
@@ -221,70 +266,48 @@ function reducer(state: AppState, action: Action): AppState {
     case 'CLEAR_CART':
       return { ...state, cart: [] };
 
-    case 'PLACE_ORDER': // POST /orders
+    case 'ORDER_PLACED':
       return {
         ...state,
-        orders: [action.order, ...state.orders],
+        orders: [action.order, ...state.orders.filter((o) => o.id !== action.order.id)],
         cart: [],
         lastPlacedOrderId: action.order.id,
-        liveOrderIds: [...state.liveOrderIds, action.order.id],
       };
 
-    case 'ADVANCE_LIVE_ORDERS': {
-      // Stand-in for websocket / polling GET /orders/:id
-      const live = new Set(state.liveOrderIds);
-      const orders = state.orders.map((o) => (live.has(o.id) ? advanceOrder(o) : o));
-      const liveOrderIds = state.liveOrderIds.filter((id) => {
-        const o = orders.find((x) => x.id === id);
-        return o !== undefined && !isTerminalStatus(o.status);
-      });
-      return { ...state, orders, liveOrderIds };
-    }
-
-    case 'CANCEL_ORDER': // POST /orders/:id/cancel
+    case 'ORDER_UPDATED':
       return {
         ...state,
-        orders: state.orders.map((o) =>
-          o.id === action.id && isCancellable(o) ? { ...o, status: 'CANCELLED' } : o,
-        ),
-        liveOrderIds: state.liveOrderIds.filter((id) => id !== action.id),
+        orders: state.orders.map((o) => (o.id === action.order.id ? action.order : o)),
       };
 
     case 'DISMISS_ORDER_BANNER':
       return { ...state, lastPlacedOrderId: null };
 
-    case 'SET_USER': // GET /me | PATCH /me
+    case 'SET_USER':
       return state.currentUser ? { ...state, currentUser: action.user } : state;
 
-    case 'UPSERT_ADDRESS': {
-      // POST /addresses | PATCH /addresses/:id
-      const exists = state.addresses.some((a) => a.id === action.address.id);
-      const list = exists
-        ? state.addresses.map((a) => (a.id === action.address.id ? action.address : a))
-        : [...state.addresses, action.address];
-      const addresses = normalizeDefault(
-        list,
-        action.address.is_default ? action.address.id : undefined,
-      );
+    case 'ADDRESS_SAVED': {
+      const saved = action.address;
+      const list = action.isNew
+        ? [...state.addresses.filter((a) => a.id !== saved.id), saved]
+        : state.addresses.map((a) => (a.id === saved.id ? saved : a));
+      // The server keeps exactly one default; mirror that locally without a refetch.
+      const addresses = saved.is_default
+        ? list.map((a) => (a.id === saved.id ? a : { ...a, is_default: false }))
+        : list;
       return {
         ...state,
         addresses,
-        selectedAddressId: exists ? state.selectedAddressId : action.address.id,
+        selectedAddressId: action.isNew ? saved.id : state.selectedAddressId,
       };
     }
 
-    case 'DELETE_ADDRESS': {
-      // DELETE /addresses/:id
-      const addresses = normalizeDefault(state.addresses.filter((a) => a.id !== action.id));
-      const selectedAddressId =
-        state.selectedAddressId === action.id
-          ? (addresses.find((a) => a.is_default)?.id ?? null)
-          : state.selectedAddressId;
-      return { ...state, addresses, selectedAddressId };
-    }
-
-    case 'SET_DEFAULT_ADDRESS': // PATCH /addresses/:id { is_default: true }
-      return { ...state, addresses: normalizeDefault(state.addresses, action.id) };
+    case 'ADDRESS_REMOVED':
+      return {
+        ...state,
+        addresses: state.addresses.filter((a) => a.id !== action.id),
+        selectedAddressId: state.selectedAddressId === action.id ? null : state.selectedAddressId,
+      };
 
     case 'SELECT_ADDRESS':
       return { ...state, selectedAddressId: action.id };
@@ -308,6 +331,10 @@ interface AppContextValue {
   cart: CartItem[];
   orders: Order[];
   lastPlacedOrderId: ID | null;
+  /** Fetch state per collection, for loading spinners and error/retry UI. */
+  catalogLoad: Resource;
+  addressesLoad: Resource;
+  ordersLoad: Resource;
   // derived
   cartCount: number;
   bill: BillBreakdown;
@@ -326,37 +353,98 @@ interface AppContextValue {
   resetPassword: (email: string, code: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   updateUser: (patch: MePatch) => Promise<void>;
-  // cart
+  // reloads (never throw; failures land in the matching `*Load.error`)
+  refreshCatalog: () => Promise<void>;
+  refreshAddresses: () => Promise<void>;
+  refreshOrders: () => Promise<void>;
+  // cart (local only)
   addToCart: (product: Product, opts?: { quantity?: number; spice_level?: SpiceLevel; note?: string }) => void;
   changeQuantity: (cartItemId: ID, delta: number) => void;
   updateCartItem: (cartItemId: ID, patch: Pick<CartItem, 'note' | 'spice_level'>) => void;
   removeFromCart: (cartItemId: ID) => void;
   clearCart: () => void;
-  // orders
-  placeOrder: (input: PlaceOrderInput) => Order;
-  cancelOrder: (orderId: ID) => void;
+  // orders (throw on failure)
+  placeOrder: (input: PlaceOrderInput) => Promise<Order>;
+  cancelOrder: (orderId: ID) => Promise<void>;
   dismissOrderBanner: () => void;
-  // addresses
-  saveAddress: (input: AddressInput) => Address;
-  deleteAddress: (addressId: ID) => void;
-  setDefaultAddress: (addressId: ID) => void;
+  // addresses (throw on failure)
+  saveAddress: (input: AddressInput) => Promise<Address>;
+  deleteAddress: (addressId: ID) => Promise<void>;
+  setDefaultAddress: (addressId: ID) => Promise<void>;
   selectAddress: (addressId: ID) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-/** How often the mock kitchen moves live orders one step forward. */
-const KITCHEN_TICK_MS = 15000;
+/** How often in-progress orders are re-fetched while the app is in the foreground. */
+const ORDER_POLL_MS = 20000;
 const ORDER_BANNER_MS = 8000;
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   /** Email + password from sign-up / an unconfirmed login. Never persisted. */
   const pendingLogin = useRef<{ email: string; password: string } | null>(null);
+  /**
+   * Bumped on every login/logout. A response that arrives after the session changed
+   * belongs to the previous user and is dropped.
+   */
+  const sessionGen = useRef(0);
+  /** Random per checkout; combined with the body hash into the Idempotency-Key. */
+  const checkoutNonce = useRef(newId('chk'));
+
+  const userId = state.currentUser?.id ?? null;
+
+  // ---- loaders -----------------------------------------------------------
+  /**
+   * Fetch one collection with a fresh token. `silent` keeps the current status/data on
+   * screen (used for background polling and refetch-after-mutation).
+   */
+  async function load<T>(
+    resource: ResourceKey,
+    fetcher: (token: string) => Promise<T>,
+    onData: (data: T) => Action,
+    silent = false,
+  ): Promise<void> {
+    const gen = sessionGen.current;
+    if (!silent) dispatch({ type: 'LOAD_START', resource });
+    try {
+      const data = await withAuth(fetcher);
+      if (gen === sessionGen.current) dispatch(onData(data));
+    } catch (e) {
+      if (gen === sessionGen.current && !silent) {
+        dispatch({ type: 'LOAD_ERROR', resource, error: errorMessage(e) });
+      }
+    }
+  }
+
+  const refreshCatalog = (silent = false) =>
+    load(
+      'catalog',
+      (t) => Promise.all([catalogApi.categories(t), catalogApi.products(t)]),
+      ([categories, products]) => ({ type: 'CATALOG_LOADED', categories, products }),
+      silent,
+    );
+  const refreshAddresses = (silent = false) =>
+    load('addresses', addressApi.list, (addresses) => ({ type: 'ADDRESSES_LOADED', addresses }), silent);
+  const refreshOrders = (silent = false) =>
+    load('orders', orderApi.list, (orders) => ({ type: 'ORDERS_LOADED', orders }), silent);
+
+  // Load everything for a newly signed-in user.
+  const onSignedIn = useEffectEvent(() => {
+    void refreshCatalog();
+    void refreshAddresses();
+    void refreshOrders();
+  });
+  useEffect(() => {
+    if (userId) onSignedIn();
+  }, [userId]);
 
   // Startup: restore a saved session, and drop back to login if it ever expires.
   useEffect(() => {
-    setSessionExpiredHandler(() => dispatch({ type: 'LOGOUT' }));
+    setSessionExpiredHandler(() => {
+      sessionGen.current += 1;
+      dispatch({ type: 'LOGOUT' });
+    });
     let cancelled = false;
     (async () => {
       try {
@@ -379,21 +467,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const normEmail = (email: string) => email.trim().toLowerCase();
-
-  const login = async (email: string, password: string) => {
-    const res = await authApi.login(normEmail(email), password);
-    await startSession(res);
-    pendingLogin.current = null;
-    dispatch({ type: 'LOGIN', user: res.user });
-  };
-
-  const hasLiveOrders = state.liveOrderIds.length > 0;
+  // Live order status: poll while any order is in progress and the app is in the foreground,
+  // and catch up immediately when the app comes back to the foreground.
+  const hasActiveOrders = state.orders.some((o) => !isTerminalStatus(o.status));
+  const pollOrders = useEffectEvent(() => {
+    if (RNAppState.currentState === 'active') void refreshOrders(true);
+  });
   useEffect(() => {
-    if (!hasLiveOrders) return;
-    const timer = setInterval(() => dispatch({ type: 'ADVANCE_LIVE_ORDERS' }), KITCHEN_TICK_MS);
-    return () => clearInterval(timer);
-  }, [hasLiveOrders]);
+    if (!userId || !hasActiveOrders) return;
+    const timer = setInterval(pollOrders, ORDER_POLL_MS);
+    const sub = RNAppState.addEventListener('change', (s) => {
+      if (s === 'active') pollOrders();
+    });
+    return () => {
+      clearInterval(timer);
+      sub.remove();
+    };
+  }, [userId, hasActiveOrders]);
 
   // Auto-hide the "order placed" banner after a few seconds.
   useEffect(() => {
@@ -402,28 +492,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(timer);
   }, [state.lastPlacedOrderId]);
 
-  const userOrders = state.currentUser
-    ? state.orders
-        .filter((o) => o.user_id === state.currentUser?.id)
-        .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    : [];
-  const userAddresses = state.currentUser
-    ? state.addresses.filter((a) => a.user_id === state.currentUser?.id)
-    : [];
-  const defaultAddress = userAddresses.find((a) => a.is_default) ?? userAddresses[0] ?? null;
+  // ---- auth ----------------------------------------------------------------
+  const normEmail = (email: string) => email.trim().toLowerCase();
+
+  const login = async (email: string, password: string) => {
+    const res = await authApi.login(normEmail(email), password);
+    await startSession(res);
+    pendingLogin.current = null;
+    sessionGen.current += 1;
+    dispatch({ type: 'LOGIN', user: res.user });
+  };
+
+  // ---- derived -------------------------------------------------------------
+  const defaultAddress = state.addresses.find((a) => a.is_default) ?? state.addresses[0] ?? null;
   const selectedAddress =
-    userAddresses.find((a) => a.id === state.selectedAddressId) ?? defaultAddress;
+    state.addresses.find((a) => a.id === state.selectedAddressId) ?? defaultAddress;
+
+  const toBody = (input: AddressInput): AddressBody => ({
+    label: input.label,
+    receiver_name: input.receiver_name.trim(),
+    receiver_phone: input.receiver_phone,
+    line1: input.line1.trim(),
+    line2: input.line2?.trim() || null,
+    landmark: input.landmark?.trim() || null,
+    pincode: input.pincode,
+    is_default: input.is_default,
+  });
 
   const value: AppContextValue = {
     currentUser: state.currentUser,
-    categories: [...state.categories]
+    categories: state.categories
       .filter((c) => c.is_active)
       .sort((a, b) => a.sort_order - b.sort_order),
     products: state.products,
-    addresses: userAddresses,
+    addresses: state.addresses,
     cart: state.cart,
-    orders: userOrders,
+    orders: state.orders,
     lastPlacedOrderId: state.lastPlacedOrderId,
+    catalogLoad: state.load.catalog,
+    addressesLoad: state.load.addresses,
+    ordersLoad: state.load.orders,
 
     cartCount: state.cart.reduce((n, c) => n + c.quantity, 0),
     bill: computeBill(state.cart),
@@ -472,6 +580,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     logout: async () => {
       const token = await clearSession();
       pendingLogin.current = null;
+      sessionGen.current += 1;
       dispatch({ type: 'LOGOUT' });
       // Revoke on the server too; if offline, the token still expires in 30 days.
       if (token) authApi.logout(token).catch(() => undefined);
@@ -480,6 +589,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const user = await withAuth((t) => meApi.patch(t, patch));
       dispatch({ type: 'SET_USER', user });
     },
+
+    refreshCatalog: () => refreshCatalog(),
+    refreshAddresses: () => refreshAddresses(),
+    refreshOrders: () => refreshOrders(),
 
     addToCart: (product, opts = {}) => {
       const note = opts.note?.trim() || undefined;
@@ -501,63 +614,69 @@ export function AppProvider({ children }: { children: ReactNode }) {
     removeFromCart: (id) => dispatch({ type: 'REMOVE_CART_ITEM', id }),
     clearCart: () => dispatch({ type: 'CLEAR_CART' }),
 
-    placeOrder: (input) => {
-      const user = state.currentUser;
-      const address = userAddresses.find((a) => a.id === input.address_id);
-      if (!user) throw new Error('You must be logged in to place an order.');
-      if (!address) throw new Error('Please select a delivery address.');
+    placeOrder: async (input) => {
+      if (!state.currentUser) throw new Error('You must be logged in to place an order.');
+      if (!state.addresses.some((a) => a.id === input.address_id)) {
+        throw new Error('Please select a delivery address.');
+      }
       if (state.cart.length === 0) throw new Error('Your cart is empty.');
 
-      const now = new Date();
-      const orderId = newId('ord');
-      const bill = computeBill(state.cart);
-      const items: OrderItem[] = state.cart.map((c) => ({
-        id: newId('oit'),
-        order_id: orderId,
-        product_id: c.product_id,
-        product_name: c.product.name,
-        unit_price: c.product.price,
-        quantity: c.quantity,
-        spice_level: c.spice_level,
-        note: c.note,
-        line_total: c.product.price * c.quantity,
-      }));
-      const order: Order = {
-        id: orderId,
-        order_number: nextOrderNumber(state.orders, now),
-        user_id: user.id,
-        address_snapshot: { ...address },
-        delivery_date: input.delivery_date,
-        slot_label: input.slot_label,
-        status: input.payment_method === 'online' ? 'PENDING_PAYMENT' : 'CONFIRMED',
-        ...bill,
-        payment_method: input.payment_method,
-        payment_status: 'pending',
-        created_at: now.toISOString(),
-        items,
+      const body: CreateOrderInput = {
+        ...input,
+        items: state.cart.map((c) => ({
+          product_id: c.product_id,
+          quantity: c.quantity,
+          spice_level: c.spice_level,
+          note: c.note,
+        })),
       };
-      dispatch({ type: 'PLACE_ORDER', order });
-      return order;
+      // Same cart + same choices => same key, so retrying after a timeout is safe.
+      const key = `${checkoutNonce.current}-${hash(JSON.stringify(body))}`;
+      try {
+        const order = await withAuth((t) => orderApi.create(t, body, key));
+        checkoutNonce.current = newId('chk');
+        dispatch({ type: 'ORDER_PLACED', order });
+        return order;
+      } catch (e) {
+        // Rejected because the menu changed (price, sold out, removed)? Reload it so the
+        // cart shows the current state before the user tries again.
+        if (isApiError(e) && (e.status === 400 || e.status === 409 || e.status === 422)) {
+          void refreshCatalog(true);
+        }
+        throw e;
+      }
     },
-    cancelOrder: (id) => dispatch({ type: 'CANCEL_ORDER', id }),
+    cancelOrder: async (id) => {
+      try {
+        const order = await withAuth((t) => orderApi.cancel(t, id));
+        dispatch({ type: 'ORDER_UPDATED', order });
+      } catch (e) {
+        // Most likely the kitchen moved it past CONFIRMED meanwhile; show the real status.
+        void refreshOrders(true);
+        throw e;
+      }
+    },
     dismissOrderBanner: () => dispatch({ type: 'DISMISS_ORDER_BANNER' }),
 
-    saveAddress: (input) => {
-      const user = state.currentUser ?? MOCK_USER;
-      const address: Address = {
-        ...input,
-        id: input.id ?? newId('adr'),
-        user_id: user.id,
-        city: 'Pune',
-        line2: input.line2?.trim() || undefined,
-        landmark: input.landmark?.trim() || undefined,
-        is_default: input.is_default || userAddresses.length === 0,
-      };
-      dispatch({ type: 'UPSERT_ADDRESS', address });
+    saveAddress: async (input) => {
+      const body = toBody({ ...input, is_default: input.is_default || state.addresses.length === 0 });
+      const isNew = !input.id;
+      const address = await withAuth((t) =>
+        input.id ? addressApi.update(t, input.id, body) : addressApi.create(t, body),
+      );
+      dispatch({ type: 'ADDRESS_SAVED', address, isNew });
       return address;
     },
-    deleteAddress: (id) => dispatch({ type: 'DELETE_ADDRESS', id }),
-    setDefaultAddress: (id) => dispatch({ type: 'SET_DEFAULT_ADDRESS', id }),
+    deleteAddress: async (id) => {
+      await withAuth((t) => addressApi.remove(t, id));
+      dispatch({ type: 'ADDRESS_REMOVED', id });
+      // If it was the default, the server may have promoted another one.
+      void refreshAddresses(true);
+    },
+    setDefaultAddress: async (id) => {
+      const address = await withAuth((t) => addressApi.update(t, id, { is_default: true }));
+      dispatch({ type: 'ADDRESS_SAVED', address, isNew: false });
+    },
     selectAddress: (id) => dispatch({ type: 'SELECT_ADDRESS', id }),
   };
 

@@ -2,13 +2,13 @@ import { Image } from 'expo-image';
 import { useState } from 'react';
 import { StyleSheet, Text, View, type DimensionValue, type StyleProp, type ViewStyle } from 'react-native';
 
+import { imageSources, PRODUCT_FALLBACK_IMAGES } from '@/constants/images';
 import { Colors, Radius } from '@/constants/theme';
-import { PRODUCT_IMAGES } from '@/data/mock-data';
 import type { Product } from '@/types';
 
 /**
- * Shows the bundled photo for a product if we ship one, otherwise
- * `product.image_url` from the API, with a plate emoji as last-resort fallback.
+ * Shows `product.image_url` from the API. If that is missing or fails to load, falls back
+ * to a bundled photo for the product id (if we ship one), then to a plate emoji.
  */
 export function ProductImage({
   product,
@@ -28,19 +28,21 @@ export function ProductImage({
 }) {
   const h = height ?? size ?? 0;
   const w = width ?? size ?? h;
-  const [failed, setFailed] = useState(false);
-  const source = PRODUCT_IMAGES[product.id] ?? (product.image_url ? { uri: product.image_url } : null);
+  const sources = imageSources(product.image_url, PRODUCT_FALLBACK_IMAGES[product.id]);
+  const [attempt, setAttempt] = useState(0);
+  const source = sources[attempt];
 
   return (
     <View style={[styles.tile, { width: w, height: h, borderRadius: radius }, style]}>
       <Text style={{ fontSize: Math.min(h * 0.4, 96) }}>🍽️</Text>
-      {source && !failed ? (
+      {source !== undefined ? (
         <Image
+          key={attempt}
           source={source}
           style={StyleSheet.absoluteFill}
           contentFit="cover"
           transition={150}
-          onError={() => setFailed(true)}
+          onError={() => setAttempt((n) => n + 1)}
           accessibilityLabel={product.name}
         />
       ) : null}

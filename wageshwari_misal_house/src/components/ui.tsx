@@ -328,8 +328,50 @@ export function EmptyState({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Loading / load-error state for server data
+// ---------------------------------------------------------------------------
+/**
+ * Spinner while `loading`; otherwise, if `error` is set, the message and a Retry button.
+ * Renders nothing when there is neither.
+ */
+export function LoadState({
+  loading,
+  error,
+  onRetry,
+  compact = false,
+}: {
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+  /** Inline (inside a card or list section) instead of filling the screen. */
+  compact?: boolean;
+}) {
+  if (loading) {
+    return (
+      <View style={compact ? styles.loadCompact : styles.load}>
+        <ActivityIndicator color={Colors.primary} size={compact ? 'small' : 'large'} />
+      </View>
+    );
+  }
+  if (!error) return null;
+  return (
+    <View style={compact ? styles.loadCompact : styles.load}>
+      <View style={styles.errorRow}>
+        <Icon name="info" size={16} color={Colors.danger} />
+        <Text style={styles.loadError}>{error}</Text>
+      </View>
+      <Button title="Retry" variant="outline" onPress={onRetry} style={styles.retryBtn} />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   pressed: { opacity: 0.75 },
+  load: { alignItems: 'center', justifyContent: 'center', padding: Spacing.xxl, gap: Spacing.md },
+  loadCompact: { alignItems: 'center', paddingVertical: Spacing.lg, gap: Spacing.md },
+  loadError: { flexShrink: 1, fontFamily: Fonts.medium, fontSize: 14, color: Colors.danger, textAlign: 'center' },
+  retryBtn: { minWidth: 140 },
 
   btn: {
     minHeight: 50,

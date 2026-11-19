@@ -7,7 +7,17 @@
  *
  * Authenticated calls take an ID token; `src/services/session.ts` supplies a fresh one.
  */
-import type { User } from '@/types';
+import type {
+  Address,
+  AddressInput,
+  Category,
+  ID,
+  Order,
+  PlaceOrderInput,
+  Product,
+  SpiceLevel,
+  User,
+} from '@/types';
 
 const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const TIMEOUT_MS = 15000;
@@ -29,12 +39,19 @@ export const isApiError = (e: unknown): e is ApiError => e instanceof ApiError;
 /** A user-facing message for any thrown value. */
 export function errorMessage(e: unknown): string {
   if (isApiError(e)) return e.message;
+  if (e instanceof Error && e.message) return e.message;
   return 'Something went wrong. Please try again.';
 }
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
-async function request<T>(method: Method, path: string, opts: { body?: unknown; token?: string } = {}): Promise<T> {
+interface RequestOptions {
+  body?: unknown;
+  token?: string;
+  headers?: Record<string, string>;
+}
+
+async function request<T>(method: Method, path: string, opts: RequestOptions = {}): Promise<T> {
   if (!BASE_URL) {
     throw new ApiError(
       0,
@@ -43,7 +60,7 @@ async function request<T>(method: Method, path: string, opts: { body?: unknown; 
     );
   }
 
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: 'application/json', ...opts.headers };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
 
@@ -78,15 +95,15 @@ async function request<T>(method: Method, path: string, opts: { body?: unknown; 
   if (!res.ok) {
     const body = data as { error?: { code?: string; message?: string }; message?: string } | null;
     // Our Lambdas send { error: {code, message} }. API Gateway's own rejections
-    // (JWT authorizer, throttling) send { message: "Unauthorized" } instead.
-    const code = body?.error?.code ?? (res.status === 401 ? 'UNAUTHORIZED' : res.status === 429 ? 'TOO_MANY_REQUESTS' : `HTTP_${res.status}`);
-    const message =
-      body?.error?.message ??
-      (res.status === 401
-        ? 'Your session has expired. Please log in again.'
-        : res.status === 429
-          ? 'Too many requests. Please wait a moment and try again.'
-          : `Request failed (${res.status}).`);
+    // (JWT authorizer, throttling, a route that isn't deployed) send { message: "..." } instead.
+    const fallback: Record<number, [string, string]> = {
+      401: ['UNAUTHORIZED', 'Your session has expired. Please log in again.'],
+      404: ['ROUTE_NOT_FOUND', "This feature isn't available on the server yet."],
+      429: ['TOO_MANY_REQUESTS', 'Too many requests. Please wait a moment and try again.'],
+    };
+    const [fbCode, fbMessage] = fallback[res.status] ?? [`HTTP_${res.status}`, `Request failed (${res.status}).`];
+    const code = body?.error?.code ?? fbCode;
+    const message = body?.error?.message ?? fbMessage;
     throw new ApiError(res.status, code, message);
   }
   return data as T;
@@ -155,4 +172,64 @@ export const authApi = {
 export const meApi = {
   get: (token: string) => request<User>('GET', '/me', { token }),
   patch: (token: string, patch: MePatch) => request<User>('PATCH', '/me', { token, body: patch }),
+};
+
+// ---------------------------------------------------------------------------
+// Catalog, addresses, orders (contract: README.md section 5; not deployed yet,
+// see BACKEND_INTEGRATION_REPORT.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * List endpoints are specified as a plain JSON array. A paginated `{ items: [...] }`
+ * envelope is also accepted so the backend can add cursors without breaking the app.
+ */
+type ListResponse<T> = T[] | { items: T[] };
+
+async function list<T>(path: string, token: string): Promise<T[]> {
+  const data = await request<ListResponse<T> | null>('GET', path, { token });
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.items)) return data.items;
+  throw new ApiError(0, 'BAD_RESPONSE', 'The server sent an unexpected response.');
+}
+
+/** Body of POST /orders. The cart lives on the device, so its lines travel with the order. */
+export interface CreateOrderInput extends PlaceOrderInput {
+  items: { product_id: ID; quantity: number; spice_level?: SpiceLevel; note?: string }[];
+}
+
+/**
+ * POST /addresses and PATCH /addresses/:id bodies: no id, user_id or city (server-owned).
+ * Optional text fields are sent as `null` when empty so an edit can clear them.
+ */
+export type AddressBody = Omit<AddressInput, 'id' | 'line2' | 'landmark'> & {
+  line2: string | null;
+  landmark: string | null;
+};
+
+const enc = encodeURIComponent;
+
+export const catalogApi = {
+  categories: (token: string) => list<Category>('/categories', token),
+  products: (token: string) => list<Product>('/products', token),
+};
+
+export const addressApi = {
+  list: (token: string) => list<Address>('/addresses', token),
+  create: (token: string, body: AddressBody) =>
+    request<Address>('POST', '/addresses', { token, body }),
+  update: (token: string, id: ID, body: Partial<AddressBody>) =>
+    request<Address>('PATCH', `/addresses/${enc(id)}`, { token, body }),
+  remove: (token: string, id: ID) => request<void>('DELETE', `/addresses/${enc(id)}`, { token }),
+};
+
+export const orderApi = {
+  list: (token: string) => list<Order>('/orders', token),
+  get: (token: string, id: ID) => request<Order>('GET', `/orders/${enc(id)}`, { token }),
+  /**
+   * `idempotencyKey` is the same for every retry of one checkout attempt, so a request that
+   * timed out but actually reached the server can't create a second order.
+   */
+  create: (token: string, body: CreateOrderInput, idempotencyKey: string) =>
+    request<Order>('POST', '/orders', { token, body, headers: { 'Idempotency-Key': idempotencyKey } }),
+  cancel: (token: string, id: ID) => request<Order>('POST', `/orders/${enc(id)}/cancel`, { token }),
 };

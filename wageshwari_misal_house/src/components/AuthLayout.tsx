@@ -9,7 +9,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Icon } from '@/components/Icon';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
-import { LOGIN_BG, LOGO } from '@/data/mock-data';
+import { LOGIN_BG, LOGO } from '@/constants/images';
 
 export function AuthLayout({
   title,

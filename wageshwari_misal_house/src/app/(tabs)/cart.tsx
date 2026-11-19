@@ -21,6 +21,7 @@ import {
 import { HOME_HREF } from '@/constants/routes';
 import { Colors, Fonts, Radius, Shadow, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
+import { errorMessage } from '@/services/api';
 import type { CartItem, PaymentMethod } from '@/types';
 import {
   addDays,
@@ -75,7 +76,7 @@ export default function CartScreen() {
     );
   }
 
-  const handlePlaceOrder = () => {
+  const handlePlaceOrder = async () => {
     if (!selectedAddress) {
       setError('Please add a delivery address.');
       setAddressOpen(true);
@@ -85,24 +86,26 @@ export default function CartScreen() {
       setError('Please choose a delivery slot.');
       return;
     }
+    if (cart.some((c) => !c.product.is_available)) {
+      setError('Some items are sold out. Remove them to continue.');
+      return;
+    }
+    if (placing) return;
     setError(null);
     setPlacing(true);
-    // Simulated network latency for POST /orders
-    setTimeout(() => {
-      try {
-        placeOrder({
-          address_id: selectedAddress.id,
-          delivery_date: deliveryDate,
-          slot_label: slotLabel(selectedSlot),
-          payment_method: payment,
-        });
-        router.navigate('/orders');
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Could not place order. Please try again.');
-      } finally {
-        setPlacing(false);
-      }
-    }, 600);
+    try {
+      await placeOrder({
+        address_id: selectedAddress.id,
+        delivery_date: deliveryDate,
+        slot_label: slotLabel(selectedSlot),
+        payment_method: payment,
+      });
+      router.navigate('/orders');
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setPlacing(false);
+    }
   };
 
   return (
@@ -131,6 +134,9 @@ export default function CartScreen() {
                 </View>
                 <Text style={styles.unitPrice}>{formatCurrency(item.product.price)} each</Text>
                 <View style={styles.itemTags}>
+                  {!item.product.is_available ? (
+                    <Tag label="Sold out" color={Colors.danger} bg={Colors.dangerSoft} />
+                  ) : null}
                   {item.spice_level ? (
                     <Tag label={SPICE_LABELS[item.spice_level]} icon="flame" color={Colors.spice} bg={Colors.spiceSoft} />
                   ) : null}

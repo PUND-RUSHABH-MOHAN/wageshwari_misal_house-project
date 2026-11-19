@@ -4,10 +4,10 @@ A food-ordering app for **Wagheshwar Misal House**, Pune. Customers browse the m
 (Misal, Thali, Vada Pav, Chaha), pick a spice level, choose a delivery slot and
 place orders (Cash on Delivery / Online).
 
-> **Current status:** the UI and app flow are complete. The app runs on
-> **built-in mock data**. There is **no backend connection yet**: no base URL and
-> no HTTP calls. The "API integration" section below explains exactly where the
-> backend plugs in, and the JSON format each screen expects.
+> **Current status:** every screen reads from and writes to the backend; there is no
+> mock data left. Auth and profile are live. Menu, addresses and orders call endpoints
+> that are **not deployed yet**. Until they are, those screens show an error with a
+> Retry button. See **`BACKEND_INTEGRATION_REPORT.md`** for what the backend still needs.
 
 ---
 
@@ -51,8 +51,10 @@ src/
 │       ├── orders.tsx        # Order history + live status
 │       └── profile.tsx       # Profile + saved addresses
 ├── components/               # Reusable UI (ProductCard, ProductDetailSheet, BottomSheet, …)
-├── context/AppContext.tsx    # ★ Global state + every action that will become an API call
-├── data/mock-data.ts         # ★ Mock data (same shape as API responses) + bundled images
+├── context/AppContext.tsx    # ★ Global state; screens call useApp(), actions call the API
+├── services/api.ts           # ★ Every HTTP call (one function per endpoint)
+├── services/session.ts       # Tokens: secure storage + silent refresh
+├── constants/images.ts       # Logo + bundled fallback food photos
 ├── types/index.ts            # ★ Data models = the JSON contract with the backend
 ├── utils/pricing.ts          # Bill calculation, delivery fee, GST, delivery slots, kitchen hours
 ├── utils/format.ts           # Currency (paise → ₹), dates, spice labels, validators
@@ -72,8 +74,8 @@ npx tsc --noEmit        # type-check
 npx expo lint           # lint
 ```
 
-> Login is mocked. Any valid email + password (6+ characters), or any 10-digit
-> mobile number + any 4-digit OTP, logs in as the demo user.
+> Login uses the real backend: sign up with a real email address and confirm the
+> emailed 6-digit code.
 
 ---
 
@@ -87,13 +89,17 @@ npx expo lint           # lint
 | `eas.json` | The same variable for EAS cloud builds (`preview`, `production`). |
 | `src/services/api.ts` | The only place that calls `fetch`. One function per endpoint; every failure becomes an `ApiError` with the backend's `code` and `message`. |
 | `src/services/session.ts` | Tokens. The refresh token (30 days) is kept in the OS keystore with `expo-secure-store`; the ID token (1 hour) only in memory, renewed automatically. |
-| `src/context/AppContext.tsx` | Screens call `useApp()`. Auth and profile actions call the API; the rest is still mock data. |
+| `src/context/AppContext.tsx` | Screens call `useApp()`. Every action calls the API; each collection has a `*Load` status (`idle`/`loading`/`ready`/`error`) for spinners and Retry. |
 
 **Live (Part 2):** sign-up, email-code confirmation, login, remembered login across restarts,
 silent token refresh, forgot/reset password, `GET`/`PATCH /me`, logout (revokes the refresh token).
 
-**Still mock data until their backend parts land:** categories and products (part 3), addresses
-(part 4) and orders (part 5). They live in memory and reset when the app restarts.
+**Wired, waiting for the backend:** `GET /categories`, `GET /products` (part 3), `/addresses`
+(part 4), `/orders` (part 5). Loaded after login; orders are re-fetched every 20 s while one is
+in progress and the app is in the foreground. Pull down on Home or Orders to reload.
+
+**Client-only:** the cart (sent with `POST /orders`), the bill preview, delivery slots and
+kitchen hours (`src/utils/pricing.ts`). The server's order response is the final bill.
 Phone + OTP login is removed from the login screen until part 8.
 
 ### 4.2 Running against the backend
@@ -105,24 +111,23 @@ npx expo start --clear     # scan the QR with Expo Go, or press "a" for the Andr
 
 Change the API URL in `.env` (and `eas.json` for cloud builds), then restart with `--clear`.
 
-### 4.3 Endpoint map (planned endpoints, as named in the code comments)
+### 4.3 Endpoint map
 
 | Screen | Action in code | Endpoint | Code location |
 |---|---|---|---|
 | Login | send OTP | `POST /auth/otp/send` | `src/app/login.tsx` |
 | Login | `login()` | `POST /auth/login` (email) · `POST /auth/otp/verify` (phone) | `AppContext.tsx` → `LOGIN` |
 | Profile | `logout()` | `POST /auth/logout` | `AppContext.tsx` → `LOGOUT` |
-| Home | initial data | `GET /categories`, `GET /products` | `mock-data.ts` → `CATEGORIES`, `PRODUCTS` |
-| Profile | current user | `GET /me` | `mock-data.ts` → `MOCK_USER` |
-| Profile | `updateUser()` | `PATCH /me` | `AppContext.tsx` → `UPDATE_USER` |
-| Profile / Cart | addresses list | `GET /addresses` | `mock-data.ts` → `MOCK_ADDRESSES` |
-| Profile / Cart | `saveAddress()` | `POST /addresses` (new) · `PATCH /addresses/:id` (edit) | `AppContext.tsx` → `UPSERT_ADDRESS` |
-| Profile | `deleteAddress()` | `DELETE /addresses/:id` | `AppContext.tsx` → `DELETE_ADDRESS` |
-| Profile | `setDefaultAddress()` | `PATCH /addresses/:id` `{ "is_default": true }` | `AppContext.tsx` → `SET_DEFAULT_ADDRESS` |
-| Cart | `placeOrder()` | `POST /orders` | `AppContext.tsx` → `PLACE_ORDER` |
-| Orders | order history | `GET /orders` | `mock-data.ts` → `buildSeedOrders()` |
-| Orders | live status | `GET /orders/:id` (polling) or a websocket | `AppContext.tsx` → `ADVANCE_LIVE_ORDERS` |
-| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | `AppContext.tsx` → `CANCEL_ORDER` |
+| Home | `refreshCatalog()` | `GET /categories`, `GET /products` | `api.ts` → `catalogApi` |
+| Profile | current user | `GET /me` | `api.ts` → `meApi.get` |
+| Profile | `updateUser()` | `PATCH /me` | `api.ts` → `meApi.patch` |
+| Profile / Cart | `refreshAddresses()` | `GET /addresses` | `api.ts` → `addressApi.list` |
+| Profile / Cart | `saveAddress()` | `POST /addresses` (new) · `PATCH /addresses/:id` (edit) | `api.ts` → `addressApi` |
+| Profile | `deleteAddress()` | `DELETE /addresses/:id` | `api.ts` → `addressApi.remove` |
+| Profile | `setDefaultAddress()` | `PATCH /addresses/:id` `{ "is_default": true }` | `api.ts` → `addressApi.update` |
+| Cart | `placeOrder()` | `POST /orders` (+ `Idempotency-Key` header) | `api.ts` → `orderApi.create` |
+| Orders | `refreshOrders()` / polling | `GET /orders` | `api.ts` → `orderApi.list` |
+| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | `api.ts` → `orderApi.cancel` |
 
 The cart is **client-side only** in v1. No cart endpoint is needed.
 
@@ -136,7 +141,7 @@ The cart is **client-side only** in v1. No cart endpoint is needed.
 |---|---|
 | Field names | `snake_case`, matching database columns 1:1 |
 | **Money** | **Integer paise** (₹1 = 100 paise). `9000` = ₹90.00. Never send decimals or rupees. |
-| IDs | Strings (mock data uses prefixes like `usr_`, `adr_`, `cat_`, `prd_`, `ord_`, `oit_`; any unique string works) |
+| IDs | Strings (the app's fallback images expect prefixes like `usr_`, `adr_`, `cat_`, `prd_`, `ord_`, `oit_`; any unique string works) |
 | Dates | `delivery_date`: `"YYYY-MM-DD"`. `created_at`: ISO 8601 timestamp |
 | Optional fields | May be omitted or `null` (`line2`, `landmark`, `spice_level`, `note`) |
 | Response body | The app expects the plain object/array shown below. If the backend wraps responses (e.g. `{ "data": … }`), unwrap them in `src/services/api.ts`. |
@@ -197,8 +202,7 @@ sorted by `sort_order`.
 ]
 ```
 
-`name` is currently limited to `"Misal" | "Thali" | "Vada Pav" | "Chaha"`. To allow
-other categories, widen the `CategoryName` type in `src/types/index.ts`.
+`name` is any string; categories are managed on the server.
 
 **`GET /products`** returns `Product[]`:
 
@@ -221,9 +225,9 @@ other categories, widen the `CategoryName` type in `src/types/index.ts`.
 
 - `has_spice_level: true` shows the Mild / Medium / Teekha picker.
 - `is_available: false` shows "Sold out" and disables adding.
-- Images: if the app ships a bundled photo for a product `id`
-  (`PRODUCT_IMAGES` in `mock-data.ts`), that photo is used. Otherwise `image_url` is
-  loaded. If neither exists, a 🍽️ placeholder is shown.
+- Images: `image_url` is loaded first. If it is missing or fails, the app falls back to a
+  bundled photo for that `id` (`PRODUCT_FALLBACK_IMAGES` in `src/constants/images.ts`),
+  then to a 🍽️ placeholder.
 
 ### 5.4 Cart screen → place order
 
@@ -367,7 +371,7 @@ and return the saved `Address`:
 | Cooking note | max 120 characters | `SpiceLevelSheet.tsx` |
 | Service area | Pune only | `src/types/index.ts` (`ServiceCity`) |
 
-Menu prices in `mock-data.ts` are **placeholders**. Real prices come from `GET /products`.
+Menu prices come from `GET /products`.
 
 ---
 

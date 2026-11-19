@@ -22,6 +22,8 @@ export interface User {
   email: string;
   role: UserRole;
   is_active: boolean;
+  /** ISO timestamp. Optional: GET /me doesn't return it yet (see BACKEND_INTEGRATION_REPORT.md). */
+  created_at?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,7 +52,8 @@ export type AddressInput = Omit<Address, 'id' | 'user_id' | 'city'> & { id?: ID 
 // ---------------------------------------------------------------------------
 // categories & products
 // ---------------------------------------------------------------------------
-export type CategoryName = 'Misal' | 'Thali' | 'Vada Pav' | 'Chaha';
+/** e.g. 'Misal' | 'Thali' | 'Vada Pav' | 'Chaha'. Managed on the server, so any string. */
+export type CategoryName = string;
 
 export interface Category {
   id: ID;

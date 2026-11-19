@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Button, Pill, TextField } from '@/components/ui';
 import { Colors, Spacing } from '@/constants/theme';
+import { errorMessage } from '@/services/api';
 import type { Address, AddressInput, AddressLabel } from '@/types';
 import { isValidIndianMobile, isValidPunePincode } from '@/utils/format';
 
@@ -26,7 +27,8 @@ export function AddressFormModal({
   initial?: Address | null;
   defaults?: { receiver_name?: string; receiver_phone?: string };
   onClose: () => void;
-  onSave: (input: AddressInput) => void;
+  /** Saves to the server; a rejection is shown in the sheet and keeps it open. */
+  onSave: (input: AddressInput) => Promise<void>;
 }) {
   const [label, setLabel] = useState<AddressLabel>(initial?.label ?? 'Home');
   const [receiverName, setReceiverName] = useState(initial?.receiver_name ?? defaults?.receiver_name ?? '');
@@ -39,8 +41,11 @@ export function AddressFormModal({
   const [pincode, setPincode] = useState(initial?.pincode ?? '');
   const [isDefault, setIsDefault] = useState(initial?.is_default ?? false);
   const [errors, setErrors] = useState<Errors>({});
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const submit = () => {
+  const submit = async () => {
+    if (saving) return;
     const next: Errors = {};
     if (!receiverName.trim()) next.receiver_name = 'Receiver name is required';
     if (!isValidIndianMobile(receiverPhone)) next.receiver_phone = 'Enter a valid 10-digit mobile number';
@@ -49,17 +54,25 @@ export function AddressFormModal({
     setErrors(next);
     if (Object.keys(next).length > 0) return;
 
-    onSave({
-      id: initial?.id,
-      label,
-      receiver_name: receiverName.trim(),
-      receiver_phone: receiverPhone,
-      line1: line1.trim(),
-      line2: line2.trim() || undefined,
-      landmark: landmark.trim() || undefined,
-      pincode,
-      is_default: isDefault,
-    });
+    setSaveError(null);
+    setSaving(true);
+    try {
+      await onSave({
+        id: initial?.id,
+        label,
+        receiver_name: receiverName.trim(),
+        receiver_phone: receiverPhone,
+        line1: line1.trim(),
+        line2: line2.trim() || undefined,
+        landmark: landmark.trim() || undefined,
+        pincode,
+        is_default: isDefault,
+      });
+    } catch (e) {
+      setSaveError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const digitsOnly = (v: string, max: number) => v.replace(/\D/g, '').slice(0, max);
@@ -70,7 +83,12 @@ export function AddressFormModal({
       onClose={onClose}
       title={initial ? 'Edit address' : 'Add new address'}
       subtitle="Delivering across Pune city"
-      footer={<Button title={initial ? 'Update address' : 'Save address'} onPress={submit} />}>
+      footer={
+        <View style={styles.footer}>
+          {saveError ? <Text style={styles.saveError}>{saveError}</Text> : null}
+          <Button title={initial ? 'Update address' : 'Save address'} onPress={submit} loading={saving} />
+        </View>
+      }>
       <View style={styles.labelRow}>
         {LABELS.map((l) => (
           <Pill key={l} label={l} selected={label === l} onPress={() => setLabel(l)} style={styles.labelPill} />
@@ -146,6 +164,8 @@ export function AddressFormModal({
 
 const styles = StyleSheet.create({
   labelRow: { flexDirection: 'row', gap: Spacing.sm },
+  footer: { gap: Spacing.sm },
+  saveError: { fontSize: 13, color: Colors.danger, fontWeight: '600', textAlign: 'center' },
   labelPill: { flex: 1 },
   row: { flexDirection: 'row', gap: Spacing.md },
   flex: { flex: 1 },

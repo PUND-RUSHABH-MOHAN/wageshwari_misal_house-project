@@ -1,20 +1,45 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Icon } from '@/components/Icon';
 import { OrderCard } from '@/components/OrderCard';
-import { EmptyState } from '@/components/ui';
+import { EmptyState, LoadState } from '@/components/ui';
 import { HOME_HREF } from '@/constants/routes';
 import { Colors, Fonts, Radius, Shadow, Spacing } from '@/constants/theme';
 import { isTerminalStatus, useApp } from '@/context/AppContext';
+import { errorMessage } from '@/services/api';
 import type { ID } from '@/types';
 import { formatCurrency } from '@/utils/format';
 
 export default function OrdersScreen() {
-  const { orders, lastPlacedOrderId, dismissOrderBanner, cancelOrder } = useApp();
+  const { orders, lastPlacedOrderId, dismissOrderBanner, cancelOrder, ordersLoad, refreshOrders } = useApp();
   const [expandedId, setExpandedId] = useState<ID | null>(null);
+  const [cancellingId, setCancellingId] = useState<ID | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await refreshOrders();
+    setRefreshing(false);
+  };
+
+  const onCancel = async (id: ID) => {
+    if (cancellingId) return;
+    setActionError(null);
+    setCancellingId(id);
+    try {
+      await cancelOrder(id);
+    } catch (e) {
+      setActionError(errorMessage(e));
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  const showLoadState = orders.length === 0 && ordersLoad.status !== 'ready';
   const [prevPlacedId, setPrevPlacedId] = useState<ID | null>(null);
 
   // Auto-expand a freshly placed order (state derived during render, no effect needed).
@@ -31,8 +56,10 @@ export default function OrdersScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>My Orders</Text>
         <Text style={styles.subtitle}>
-          {orders.length === 0
-            ? 'No orders yet'
+          {ordersLoad.status === 'loading' && orders.length === 0
+            ? 'Loading your orders…'
+            : orders.length === 0
+              ? 'No orders yet'
             : `${orders.length} order${orders.length > 1 ? 's' : ''}${activeCount ? ` · ${activeCount} in progress` : ''}`}
         </Text>
       </View>
@@ -53,12 +80,33 @@ export default function OrdersScreen() {
         </View>
       ) : null}
 
+      {actionError ? (
+        <Pressable style={styles.errorBox} onPress={() => setActionError(null)} accessibilityLabel="Dismiss error">
+          <Icon name="info" size={16} color={Colors.danger} />
+          <Text style={styles.errorText}>{actionError}</Text>
+          <Icon name="close" size={14} color={Colors.danger} />
+        </Pressable>
+      ) : null}
+      {ordersLoad.status === 'error' && orders.length > 0 ? (
+        <Text style={styles.staleNote}>Couldn&apos;t refresh: {ordersLoad.error} Pull down to retry.</Text>
+      ) : null}
+
       <FlatList
         data={orders}
         keyExtractor={(o) => o.id}
         contentContainerStyle={[styles.list, orders.length === 0 && styles.flexGrow]}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[Colors.primary]} tintColor={Colors.primary} />
+        }
         ListEmptyComponent={
+          showLoadState ? (
+            <LoadState
+              loading={ordersLoad.status === 'loading' || ordersLoad.status === 'idle'}
+              error={ordersLoad.error}
+              onRetry={() => void refreshOrders()}
+            />
+          ) : (
           <EmptyState
             emoji="🧾"
             title="No orders yet"
@@ -66,13 +114,15 @@ export default function OrdersScreen() {
             actionLabel="Browse Menu"
             onAction={() => router.navigate(HOME_HREF)}
           />
+          )
         }
         renderItem={({ item }) => (
           <OrderCard
             order={item}
             expanded={expandedId === item.id}
             onToggle={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
-            onCancel={() => cancelOrder(item.id)}
+            onCancel={() => void onCancel(item.id)}
+            cancelling={cancellingId === item.id}
           />
         )}
       />
@@ -102,4 +152,16 @@ const styles = StyleSheet.create({
   bannerText: { color: '#E8F5E9', fontSize: 12, marginTop: 2 },
   list: { padding: Spacing.lg, paddingBottom: Spacing.xxl },
   separator: { height: Spacing.md },
+  errorBox: {
+    marginHorizontal: Spacing.lg,
+    marginBottom: Spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.dangerSoft,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+  },
+  errorText: { flex: 1, fontSize: 13, color: Colors.danger, fontWeight: '600' },
+  staleNote: { marginHorizontal: Spacing.lg, fontSize: 12, color: Colors.warning },
 });
