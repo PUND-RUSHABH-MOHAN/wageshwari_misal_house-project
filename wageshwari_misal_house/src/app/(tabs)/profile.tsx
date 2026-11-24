@@ -5,6 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AddressFormModal } from '@/components/AddressFormModal';
 import { Icon } from '@/components/Icon';
 import { Button, Card, SectionTitle, Tag, TextLink } from '@/components/ui';
+import { SHOP } from '@/constants/shop';
 import { Colors, Fonts, InputStyles, Radius, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 import { errorMessage } from '@/services/api';
@@ -167,6 +168,23 @@ export default function ProfileScreen() {
           </View>
         </View>
 
+        {/* The hotel */}
+        <View>
+          <SectionTitle title="Visit us" />
+          <Card style={styles.shopCard}>
+            <Icon name="location" size={22} color={Colors.primary} />
+            <View style={styles.flex}>
+              <Text style={styles.shopName}>{SHOP.name}</Text>
+              <Text style={styles.shopLine}>
+                {SHOP.line1}, {SHOP.line2}
+              </Text>
+              <Text style={styles.shopLine}>
+                {SHOP.city} {SHOP.pincode} · Open {SHOP.hours}
+              </Text>
+            </View>
+          </Card>
+        </View>
+
         <Button
           title="Sign Out"
           icon="logout"
@@ -255,4 +273,7 @@ const styles = StyleSheet.create({
 
   signOut: { marginTop: Spacing.sm },
   version: { textAlign: 'center', fontSize: 12, color: Colors.textSubtle },
+  shopCard: { flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start' },
+  shopName: { fontFamily: Fonts.bold, fontSize: 16, color: Colors.text },
+  shopLine: { fontFamily: Fonts.regular, fontSize: 14, lineHeight: 20, color: Colors.textMuted },
 });
