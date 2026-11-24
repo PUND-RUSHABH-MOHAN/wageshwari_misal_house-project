@@ -1,21 +1,17 @@
 /**
  * Global client-side store (React Context + useReducer).
  *
- * Auth and the profile talk to the real backend (src/services/api.ts + session.ts).
- * Catalog, addresses and orders are still local mock data: each action's comment
- * names the endpoint it will be replaced by (roadmap parts 3–5).
+ * Auth, the profile and the menu talk to the real backend (src/services/api.ts + session.ts).
+ * Addresses and orders are still local mock data: each action's comment names the
+ * endpoint it will be replaced by (roadmap parts 4–5).
  */
 import { createContext, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
 
-import {
-  buildSeedOrders,
-  CATEGORIES,
-  MOCK_ADDRESSES,
-  MOCK_USER,
-  PRODUCTS,
-} from '@/data/mock-data';
+import { buildSeedOrders, MOCK_ADDRESSES, MOCK_USER } from '@/data/mock-data';
 import {
   authApi,
+  catalogApi,
+  errorMessage,
   isApiError,
   meApi,
   type CodeDelivery,
@@ -58,6 +54,9 @@ interface AppState {
   currentUser: User | null;
   categories: Category[];
   products: Product[];
+  /** Menu load state: 'loading' until GET /categories + /products answer. */
+  catalogStatus: CatalogStatus;
+  catalogError: string | null;
   addresses: Address[];
   cart: CartItem[];
   orders: Order[];
@@ -73,8 +72,10 @@ const initialState: AppState = {
   authReady: false,
   restoreError: null,
   currentUser: null,
-  categories: CATEGORIES,
-  products: PRODUCTS,
+  categories: [],
+  products: [],
+  catalogStatus: 'loading',
+  catalogError: null,
   addresses: MOCK_ADDRESSES,
   cart: [],
   orders: buildSeedOrders(),
@@ -83,7 +84,12 @@ const initialState: AppState = {
   liveOrderIds: [],
 };
 
+export type CatalogStatus = 'loading' | 'ready' | 'error';
+
 type Action =
+  | { type: 'CATALOG_LOADING' }
+  | { type: 'CATALOG_LOADED'; categories: Category[]; products: Product[] }
+  | { type: 'CATALOG_FAILED'; message: string }
   | { type: 'AUTH_READY'; user: User | null; restoreError?: string }
   | { type: 'LOGIN'; user: User }
   | { type: 'LOGOUT' }
@@ -159,6 +165,29 @@ function advanceOrder(order: Order): Order {
 // ---------------------------------------------------------------------------
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case 'CATALOG_LOADING':
+      return { ...state, catalogStatus: 'loading', catalogError: null };
+
+    case 'CATALOG_LOADED': {
+      // Refresh the product copies held in the cart, so price / sold-out changes show there too.
+      const byId = new Map(action.products.map((p) => [p.id, p]));
+      return {
+        ...state,
+        categories: action.categories,
+        products: action.products,
+        catalogStatus: 'ready',
+        catalogError: null,
+        cart: state.cart.map((c) => {
+          const fresh = byId.get(c.product_id);
+          return fresh ? { ...c, product: fresh } : c;
+        }),
+      };
+    }
+
+    case 'CATALOG_FAILED':
+      // Keep any menu already on screen; only the status changes.
+      return { ...state, catalogStatus: 'error', catalogError: action.message };
+
     case 'AUTH_READY':
       return {
         ...state,
@@ -304,6 +333,10 @@ interface AppContextValue {
   currentUser: User | null;
   categories: Category[];
   products: Product[];
+  catalogStatus: CatalogStatus;
+  catalogError: string | null;
+  /** Re-fetch the menu (pull-to-refresh, Retry). Never throws. */
+  reloadCatalog: () => Promise<void>;
   addresses: Address[];
   cart: CartItem[];
   orders: Order[];
@@ -353,6 +386,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   /** Email + password from sign-up / an unconfirmed login. Never persisted. */
   const pendingLogin = useRef<{ email: string; password: string } | null>(null);
+
+  // GET /categories + GET /products. Public, so it starts at launch alongside the session check.
+  const loadCatalog = async () => {
+    dispatch({ type: 'CATALOG_LOADING' });
+    try {
+      const [categories, products] = await Promise.all([catalogApi.categories(), catalogApi.products()]);
+      dispatch({ type: 'CATALOG_LOADED', categories, products });
+    } catch (e) {
+      dispatch({ type: 'CATALOG_FAILED', message: errorMessage(e) });
+    }
+  };
+
+  useEffect(() => {
+    loadCatalog();
+  }, []);
 
   // Startup: restore a saved session, and drop back to login if it ever expires.
   useEffect(() => {
@@ -420,6 +468,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       .filter((c) => c.is_active)
       .sort((a, b) => a.sort_order - b.sort_order),
     products: state.products,
+    catalogStatus: state.catalogStatus,
+    catalogError: state.catalogError,
+    reloadCatalog: loadCatalog,
     addresses: userAddresses,
     cart: state.cart,
     orders: userOrders,

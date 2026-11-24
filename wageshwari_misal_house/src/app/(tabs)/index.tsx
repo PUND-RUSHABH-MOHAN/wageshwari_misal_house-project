@@ -2,7 +2,18 @@ import { Image } from 'expo-image';
 import { router, useIsFocused } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useState } from 'react';
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AddressPickerModal } from '@/components/AddressPickerModal';
@@ -10,6 +21,7 @@ import { Icon } from '@/components/Icon';
 import { ProductCard } from '@/components/ProductCard';
 import { ProductDetailSheet } from '@/components/ProductDetailSheet';
 import { SpiceLevelSheet } from '@/components/SpiceLevelSheet';
+import { Button } from '@/components/ui';
 import { Colors, Fonts, InputStyles, Radius, Shadow, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 import { CATEGORY_IMAGES, LOGO } from '@/data/mock-data';
@@ -22,7 +34,26 @@ const ALL = 'all';
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
-  const { categories, products, cart, cartCount, bill, selectedAddress, addToCart } = useApp();
+  const {
+    categories,
+    products,
+    catalogStatus,
+    catalogError,
+    reloadCatalog,
+    cart,
+    cartCount,
+    bill,
+    selectedAddress,
+    addToCart,
+  } = useApp();
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Pull-to-refresh: GET /categories + GET /products again.
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await reloadCatalog();
+    setRefreshing(false);
+  };
   const { width: screenWidth } = useWindowDimensions();
   const columns = screenWidth >= 1000 ? 4 : screenWidth >= 700 ? 3 : 2;
   const cardWidth = Math.floor((screenWidth - Spacing.lg * 2 - GRID_GAP * (columns - 1)) / columns);
@@ -130,7 +161,8 @@ export default function HomeScreen() {
           <CategoryBubble
             key={c.id}
             label={c.name}
-            image={CATEGORY_IMAGES[c.id] ?? { uri: c.image_url }}
+            image={c.image_url ? { uri: c.image_url } : CATEGORY_IMAGES[c.id]}
+            fallback={CATEGORY_IMAGES[c.id]}
             selected={activeCategory === c.id}
             onPress={() => setActiveCategory((cur) => (cur === c.id ? ALL : c.id))}
           />
@@ -172,11 +204,33 @@ export default function HomeScreen() {
         ListHeaderComponent={header}
         contentContainerStyle={[styles.list, cartCount > 0 && styles.listWithBar]}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={[Colors.primary]}
+            tintColor={Colors.primary}
+          />
+        }
         ListEmptyComponent={
-          <View style={styles.noResults}>
-            <Text style={styles.noResultsEmoji}>🔍</Text>
-            <Text style={styles.noResultsText}>No dishes found{q ? ` for “${query.trim()}”` : ''}.</Text>
-          </View>
+          products.length === 0 && catalogStatus === 'loading' ? (
+            <View style={styles.noResults}>
+              <ActivityIndicator color={Colors.primary} size="large" />
+              <Text style={styles.noResultsText}>Loading the menu…</Text>
+            </View>
+          ) : products.length === 0 && catalogStatus === 'error' ? (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsEmoji}>🍽️</Text>
+              <Text style={styles.noResultsTitle}>Couldn&apos;t load the menu</Text>
+              <Text style={styles.noResultsText}>{catalogError}</Text>
+              <Button title="Try again" onPress={reloadCatalog} style={styles.retry} />
+            </View>
+          ) : (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsEmoji}>🔍</Text>
+              <Text style={styles.noResultsText}>No dishes found{q ? ` for “${query.trim()}”` : ''}.</Text>
+            </View>
+          )
         }
         renderItem={({ item }) => (
           <ProductCard
@@ -248,16 +302,20 @@ export default function HomeScreen() {
 function CategoryBubble({
   label,
   image,
+  fallback,
   selected,
   onPress,
   isLogo,
 }: {
   label: string;
   image: React.ComponentProps<typeof Image>['source'];
+  /** Bundled photo shown while `image` loads, and if it fails. */
+  fallback?: React.ComponentProps<typeof Image>['source'];
   selected: boolean;
   onPress: () => void;
   isLogo?: boolean;
 }) {
+  const [failed, setFailed] = useState(false);
   return (
     <Pressable
       accessibilityRole="button"
@@ -267,7 +325,10 @@ function CategoryBubble({
       style={({ pressed }) => [styles.bubble, pressed && { opacity: 0.85 }]}>
       <View style={[styles.bubbleRing, selected && styles.bubbleRingActive]}>
         <Image
-          source={image}
+          source={failed && fallback ? fallback : image}
+          placeholder={fallback}
+          placeholderContentFit="cover"
+          onError={() => setFailed(true)}
           style={[styles.bubbleImg, isLogo && styles.bubbleLogo]}
           contentFit={isLogo ? 'contain' : 'cover'}
         />
@@ -395,6 +456,8 @@ const styles = StyleSheet.create({
   noResults: { alignItems: 'center', padding: Spacing.xxl, gap: Spacing.sm },
   noResultsEmoji: { fontSize: 40 },
   noResultsText: { fontFamily: Fonts.medium, fontSize: 15, color: Colors.textMuted, textAlign: 'center' },
+  noResultsTitle: { fontFamily: Fonts.bold, fontSize: 18, color: Colors.text, textAlign: 'center' },
+  retry: { marginTop: Spacing.sm, alignSelf: 'center', paddingHorizontal: Spacing.xl },
 
   cartBar: {
     position: 'absolute',

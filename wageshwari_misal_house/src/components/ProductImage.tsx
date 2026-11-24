@@ -7,8 +7,9 @@ import { PRODUCT_IMAGES } from '@/data/mock-data';
 import type { Product } from '@/types';
 
 /**
- * Shows the bundled photo for a product if we ship one, otherwise
- * `product.image_url` from the API, with a plate emoji as last-resort fallback.
+ * Shows `product.image_url` (CloudFront). While it loads, and if it fails, the photo
+ * bundled with the app for that product id is shown instead; a plate emoji is the
+ * last resort.
  */
 export function ProductImage({
   product,
@@ -29,18 +30,24 @@ export function ProductImage({
   const h = height ?? size ?? 0;
   const w = width ?? size ?? h;
   const [failed, setFailed] = useState(false);
-  const source = PRODUCT_IMAGES[product.id] ?? (product.image_url ? { uri: product.image_url } : null);
+  const bundled = PRODUCT_IMAGES[product.id] ?? null;
+  const remote = product.image_url && !failed ? { uri: product.image_url } : null;
+  const source = remote ?? bundled;
 
   return (
     <View style={[styles.tile, { width: w, height: h, borderRadius: radius }, style]}>
       <Text style={{ fontSize: Math.min(h * 0.4, 96) }}>🍽️</Text>
-      {source && !failed ? (
+      {source ? (
         <Image
           source={source}
+          placeholder={remote ? bundled : undefined}
+          placeholderContentFit="cover"
           style={StyleSheet.absoluteFill}
           contentFit="cover"
           transition={150}
-          onError={() => setFailed(true)}
+          onError={() => {
+            if (remote) setFailed(true); // fall back to the bundled photo
+          }}
           accessibilityLabel={product.name}
         />
       ) : null}

@@ -3,7 +3,9 @@
 AWS backend for the app in `../wageshwari_misal_house/`. Region **ap-south-1 (Mumbai)**,
 one environment, managed with **Terraform**. Python 3.13 Lambdas on arm64.
 
-Status: **Part 1 (auth) — written, tested, planned. Not applied yet.**
+Status:
+- **Part 1, auth**: deployed 2026-11-18.
+- **Part 3, menu + photos**: deployed 2026-11-24. API `https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com`, photos `https://d2n5hm5b49hk3p.cloudfront.net`.
 
 ```
 backend/
@@ -11,25 +13,30 @@ backend/
 │   ├── common.py            errors, responses, body parsing, JWT claims, validators
 │   ├── users.py             profile item in DynamoDB
 │   ├── auth.py              /auth/* routes
-│   └── me.py                /me routes
+│   ├── me.py                /me routes
+│   └── catalog.py           /categories, /products (the menu)
 ├── tests/                   pytest + moto (no AWS account touched)
 ├── scripts/
 │   ├── gen_lambda_sources.py   src/*.py  ->  terraform/lambda_src_*.tf
-│   └── verify-auth.ps1         end-to-end check against the deployed API
-└── terraform/               all infrastructure
+│   ├── verify-auth.ps1         end-to-end check of auth against the deployed API
+│   └── verify-catalog.ps1      check of the menu API + CloudFront photos
+└── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (28 resources)
+## What gets created (55 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
 | Cognito User Pool | `wmh-users` | The user directory. Stores emails and password hashes, emails the confirmation and reset codes, issues JWTs. |
 | Cognito app client | `wmh-app` | How the mobile app identifies itself to the pool. Public (no secret), because anything in an APK can be extracted. |
 | Cognito group | `admin` | Members get `role: "admin"` (used from Part 6). |
-| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles now; addresses and orders later. On-demand billing, point-in-time recovery. |
-| IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update items in `wmh-main`. Nothing else. |
-| Lambda | `wmh-auth`, `wmh-me` | The handlers. Routing by `event["routeKey"]`. |
-| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 10 routes, a JWT authorizer on `/me`, throttled to 50 req/s (burst 100). |
+| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`) and the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`); addresses and orders later. On-demand billing, point-in-time recovery. |
+| Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
+| IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query items in `wmh-main`. Nothing else. |
+| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog` | The handlers. Routing by `event["routeKey"]`. |
+| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 12 routes, a JWT authorizer on `/me`, throttled to 50 req/s (burst 100). |
+| S3 bucket | `wmh-media-630287363216` | Menu photos under `menu/`. Fully private: all public access blocked. |
+| CloudFront | `d2n5hm5b49hk3p.cloudfront.net` | CDN in front of the bucket (price class 200, includes India). The only reader of the bucket, via Origin Access Control. |
 | CloudWatch log groups | `/aws/lambda/wmh-*`, `/aws/apigateway/wmh-api` | 14-day retention. Access logs never include headers or bodies. |
 
 ## Endpoints
@@ -49,6 +56,10 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `POST /auth/password/reset` | – | `{email, code, new_password}` | `200 {password_reset: true}` |
 | `GET /me` | JWT | – | `200 User` |
 | `PATCH /me` | JWT | `{name?, phone?}` | `200 User` |
+| `GET /categories` | – | – | `200 Category[]`: active only, by `sort_order` |
+| `GET /products` | – | – | `200 Product[]`: sold-out ones included (`is_available: false`) |
+
+Menu responses carry `Cache-Control: public, max-age=60`, so menu edits show up within a minute.
 
 `token` is the Cognito **ID token**. Send it as `Authorization: Bearer <token>`.
 `User` is exactly `src/types/index.ts` → `User`: `{id, name, phone, email, role, is_active}`.
@@ -122,7 +133,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-56 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
+65 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
 with mocks, and `verify-auth.ps1` checks them for real.
 
 ## Verify after deploy
@@ -137,12 +148,22 @@ cd ..\..
 
 It registers a real user (asks you for a password), waits for you to paste the emailed code,
 then checks confirm, login, `/me`, refresh, logout and revocation — 17 checks, PASS/FAIL each.
-If PowerShell blocks the script: `Set-ExecutionPolicy -Scope Process Bypass`.
+
+The menu needs no login:
+
+```powershell
+.\backend\scripts\verify-catalog.ps1
+```
+
+It checks both menu routes against the contract, that every photo loads from CloudFront as
+`image/jpeg`, and that the bucket refuses direct access.
+If PowerShell blocks either script: `Set-ExecutionPolicy -Scope Process Bypass`.
 
 Logs, if something fails:
 
 ```powershell
 aws logs tail /aws/lambda/wmh-auth --since 15m --profile wmh --region ap-south-1
+aws logs tail /aws/lambda/wmh-catalog --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/apigateway/wmh-api --since 15m --profile wmh --region ap-south-1
 ```
 
@@ -150,4 +171,12 @@ aws logs tail /aws/apigateway/wmh-api --since 15m --profile wmh --region ap-sout
 
 Effectively ₹0 at low traffic: Cognito (first 10,000 monthly active users free), Lambda and API
 Gateway free tiers, DynamoDB on-demand pay-per-request, a few cents of CloudWatch logs.
-Point-in-time recovery is billed per GB stored, which is tiny here.
+Point-in-time recovery is billed per GB stored, which is tiny here. CloudFront's free tier
+covers 1 TB of transfer a month; the photos in S3 cost paise.
+
+## Changing the menu (until the admin screen in Part 6)
+
+The starting menu is in `terraform/menu_seed.tf`, but Terraform only writes it **once**: editing that file
+does not change existing rows. Until Part 6, change a dish in the AWS console: DynamoDB → Tables →
+`wmh-main` → Explore items → filter `PK = CATALOG` → edit the row (prices are integer paise, `9000` = ₹90;
+set `is_available` to `false` for "Sold out"). The app picks it up within a minute (pull down on Home to refresh).
