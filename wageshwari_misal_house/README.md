@@ -1,6 +1,7 @@
 # Wagheshwar Misal House — Mobile App
 
-A food-ordering app for **Wagheshwar Misal House**, Pune. Customers browse the menu
+A food-ordering app for **Wagheshwar Misal House**, A/P Chandanzira, Jalna – Chh. Sambhajinagar
+Highway, Jalna 431203 (address in `src/constants/shop.ts`). Customers browse the menu
 (Misal, Thali, Vada Pav, Chaha), pick a spice level, choose a delivery slot and
 place orders (Cash on Delivery / Online).
 

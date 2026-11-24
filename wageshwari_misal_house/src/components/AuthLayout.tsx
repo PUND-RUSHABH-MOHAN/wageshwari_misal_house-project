@@ -8,6 +8,7 @@ import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } fr
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Icon } from '@/components/Icon';
+import { SHOP_TAGLINE } from '@/constants/shop';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
 import { LOGIN_BG, LOGO } from '@/data/mock-data';
 
@@ -51,7 +52,7 @@ export function AuthLayout({
               {children}
             </View>
 
-            {footer ?? <Text style={styles.footer}>Serving Pune since 1998 · Open 7 AM – 2 PM</Text>}
+            {footer ?? <Text style={styles.footer}>{SHOP_TAGLINE}</Text>}
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
