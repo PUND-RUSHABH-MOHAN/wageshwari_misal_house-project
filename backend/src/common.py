@@ -40,9 +40,9 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Not JSON serializable: {type(value).__name__}")
 
 
-def response(status: int, body: Any = None) -> dict:
+def response(status: int, body: Any = None, headers: dict | None = None) -> dict:
     """HTTP API (payload v2.0) response."""
-    resp: dict = {"statusCode": status, "headers": {"Content-Type": "application/json"}}
+    resp: dict = {"statusCode": status, "headers": {"Content-Type": "application/json", **(headers or {})}}
     if body is not None:
         resp["body"] = json.dumps(body, default=_json_default, ensure_ascii=False)
     return resp

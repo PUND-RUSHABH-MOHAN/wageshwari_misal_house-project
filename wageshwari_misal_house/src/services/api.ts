@@ -7,7 +7,7 @@
  *
  * Authenticated calls take an ID token; `src/services/session.ts` supplies a fresh one.
  */
-import type { User } from '@/types';
+import type { Category, Product, User } from '@/types';
 
 const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const TIMEOUT_MS = 15000;
@@ -150,6 +150,12 @@ export const authApi = {
     request<{ password_reset: true }>('POST', '/auth/password/reset', {
       body: { email, code, new_password: newPassword },
     }),
+};
+
+/** Public: no token needed. */
+export const catalogApi = {
+  categories: () => request<Category[]>('GET', '/categories'),
+  products: () => request<Product[]>('GET', '/products'),
 };
 
 export const meApi = {

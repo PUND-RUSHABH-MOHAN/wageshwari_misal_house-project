@@ -13,6 +13,10 @@ locals {
       handler = "me.handler"
       files   = ["common.py", "users.py", "me.py"]
     }
+    catalog = {
+      handler = "catalog.handler"
+      files   = ["common.py", "catalog.py"]
+    }
   }
 }
 

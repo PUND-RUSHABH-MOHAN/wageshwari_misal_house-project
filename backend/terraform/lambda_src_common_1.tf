@@ -44,9 +44,9 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Not JSON serializable: {type(value).__name__}")
 
 
-def response(status: int, body: Any = None) -> dict:
+def response(status: int, body: Any = None, headers: dict | None = None) -> dict:
     """HTTP API (payload v2.0) response."""
-    resp: dict = {"statusCode": status, "headers": {"Content-Type": "application/json"}}
+    resp: dict = {"statusCode": status, "headers": {"Content-Type": "application/json", **(headers or {})}}
     if body is not None:
         resp["body"] = json.dumps(body, default=_json_default, ensure_ascii=False)
     return resp
@@ -81,7 +81,5 @@ def parse_body(event: dict) -> dict:
 def jwt_claims(event: dict) -> dict:
     """Claims API Gateway's JWT authorizer already verified. Raises 401 if absent."""
     claims = (
-        event.get("requestContext", {}).get("authorizer", {}).get("jwt", {}).get("claims")
-    )
 PYSRC
 }

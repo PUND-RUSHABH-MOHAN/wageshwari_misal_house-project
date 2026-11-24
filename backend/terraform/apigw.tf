@@ -14,6 +14,8 @@ locals {
     "POST /auth/password/reset"  = { fn = "auth", auth = false }
     "GET /me"                    = { fn = "me", auth = true }
     "PATCH /me"                  = { fn = "me", auth = true }
+    "GET /categories"            = { fn = "catalog", auth = false }
+    "GET /products"              = { fn = "catalog", auth = false }
   }
 }
 

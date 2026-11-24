@@ -15,6 +15,11 @@ output "table_name" {
   value = aws_dynamodb_table.main.name
 }
 
+output "media_base_url" {
+  description = "CloudFront address for menu photos."
+  value       = "https://${aws_cloudfront_distribution.media.domain_name}"
+}
+
 output "region" {
   value = var.region
 }

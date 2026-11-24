@@ -1,10 +1,8 @@
 /**
- * Seed data shaped exactly like API responses. When the backend lands, replace
- * these with fetches from GET /categories, /products, /me, /addresses, /orders.
- *
- * NOTE: prices are placeholders (the design shows "₹[price]") — update them here.
+ * Local mock data for the parts without a backend yet (addresses, orders), shaped
+ * exactly like API responses, plus bundled images and the logo.
  */
-import type { Address, Category, ID, Order, Product, User } from '@/types';
+import type { Address, ID, Order, User } from '@/types';
 import { addDays, toCompactDate, toISODate } from '@/utils/format';
 
 /** Metro asset id returned by require('…png|jpg'). */
@@ -48,93 +46,12 @@ export const MOCK_ADDRESSES: Address[] = [
   },
 ];
 
-const CDN = 'https://cdn.wagheshwarmisal.in';
-
-export const CATEGORIES: Category[] = [
-  { id: 'cat_misal', name: 'Misal', name_mr: 'मिसळ', image_url: `${CDN}/categories/misal.jpg`, sort_order: 1, is_active: true },
-  { id: 'cat_thali', name: 'Thali', name_mr: 'थाळी', image_url: `${CDN}/categories/thali.jpg`, sort_order: 2, is_active: true },
-  { id: 'cat_vadapav', name: 'Vada Pav', name_mr: 'वडा पाव', image_url: `${CDN}/categories/vada-pav.jpg`, sort_order: 3, is_active: true },
-  { id: 'cat_chaha', name: 'Chaha', name_mr: 'चहा', image_url: `${CDN}/categories/chaha.jpg`, sort_order: 4, is_active: true },
-];
-
-export const PRODUCTS: Product[] = [
-  {
-    id: 'prd_misal_pav',
-    category_id: 'cat_misal',
-    name: 'Misal Pav',
-    name_mr: 'मिसळ पाव',
-    description: 'Spicy matki usal with tarri, farsan, onion, lemon and 2 soft pav.',
-    price: 9000,
-    image_url: `${CDN}/products/misal-pav.jpg`,
-    is_veg: true,
-    has_spice_level: true,
-    is_available: true,
-  },
-  {
-    id: 'prd_special_thali',
-    category_id: 'cat_thali',
-    name: 'Special Misal Thali',
-    name_mr: 'स्पेशल मिसळ थाळी',
-    description: 'Misal, extra tarri, pav, dahi, papad, farsan, kanda-limbu and taak.',
-    price: 18000,
-    image_url: `${CDN}/products/special-misal-thali.jpg`,
-    is_veg: true,
-    has_spice_level: true,
-    is_available: true,
-  },
-  {
-    id: 'prd_misal_thali',
-    category_id: 'cat_thali',
-    name: 'Misal Thali',
-    name_mr: 'मिसळ थाळी',
-    description: 'Misal with 4 pav, tarri, salad, farsan and a glass of taak.',
-    price: 15000,
-    image_url: `${CDN}/products/misal-thali.jpg`,
-    is_veg: true,
-    has_spice_level: true,
-    is_available: true,
-  },
-  {
-    id: 'prd_kolhapuri_misal',
-    category_id: 'cat_misal',
-    name: 'Kolhapuri Misal',
-    name_mr: 'कोल्हापुरी मिसळ',
-    description: 'Fiery red Kolhapuri kat, sprouted matki, farsan, onion and 2 pav.',
-    price: 11000,
-    image_url: `${CDN}/products/kolhapuri-misal.jpg`,
-    is_veg: true,
-    has_spice_level: true,
-    is_available: true,
-  },
-  {
-    id: 'prd_vada_pav',
-    category_id: 'cat_vadapav',
-    name: 'Vada Pav',
-    name_mr: 'वडा पाव',
-    description: 'Crisp batata vada in soft pav with green chutney, lasun chutney and fried mirchi.',
-    price: 2500,
-    image_url: `${CDN}/products/vada-pav.jpg`,
-    is_veg: true,
-    has_spice_level: false,
-    is_available: true,
-  },
-  {
-    id: 'prd_chaha',
-    category_id: 'cat_chaha',
-    name: 'Kadak Chaha',
-    name_mr: 'कडक चहा',
-    description: 'Strong Puneri cutting chai with ginger and elaichi. Chahala vel nasto!',
-    price: 1500,
-    image_url: `${CDN}/products/chaha.jpg`,
-    is_veg: true,
-    has_spice_level: false,
-    is_available: true,
-  },
-];
+// The menu (categories + products) now comes from GET /categories and GET /products.
+// Its starting data lives in backend/terraform/menu_seed.tf.
 
 /**
- * Bundled artwork (cropped from the shop banner). Used before the CDN images
- * in `image_url` exist; keyed by row id so API data plugs in unchanged.
+ * Bundled artwork (cropped from the shop banner), keyed by category / product id.
+ * Shown while the CloudFront photo (`image_url`) loads, and if it fails to load.
  */
 const FOOD = {
   misal: require('@/assets/images/food/misal.jpg'),

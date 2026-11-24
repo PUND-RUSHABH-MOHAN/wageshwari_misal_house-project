@@ -4,6 +4,7 @@
 locals {
   lambda_sources = {
     "auth.py" = join("", [local.lambda_src_auth_1, local.lambda_src_auth_2, local.lambda_src_auth_3, local.lambda_src_auth_4])
+    "catalog.py" = join("", [local.lambda_src_catalog_1, local.lambda_src_catalog_2])
     "common.py" = join("", [local.lambda_src_common_1, local.lambda_src_common_2, local.lambda_src_common_3])
     "me.py" = join("", [local.lambda_src_me])
     "users.py" = join("", [local.lambda_src_users_1, local.lambda_src_users_2])

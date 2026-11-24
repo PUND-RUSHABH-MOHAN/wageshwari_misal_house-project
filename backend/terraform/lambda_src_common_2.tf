@@ -2,6 +2,8 @@
 
 locals {
   lambda_src_common_2 = <<PYSRC
+        event.get("requestContext", {}).get("authorizer", {}).get("jwt", {}).get("claims")
+    )
     if not claims or not claims.get("sub"):
         raise ApiError(401, "UNAUTHORIZED", "Missing or invalid token.")
     return claims
