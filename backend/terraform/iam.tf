@@ -34,7 +34,10 @@ data "aws_iam_policy_document" "lambda" {
       "dynamodb:Query",      # catalog: read the whole menu partition in one call
       "dynamodb:DeleteItem", # addresses: DELETE /addresses/{id}
     ]
-    resources = [aws_dynamodb_table.main.arn]
+    resources = [
+      aws_dynamodb_table.main.arn,
+      "${aws_dynamodb_table.main.arn}/index/*", # admin: Query on GSI1 (the order board)
+    ]
   }
 }
 

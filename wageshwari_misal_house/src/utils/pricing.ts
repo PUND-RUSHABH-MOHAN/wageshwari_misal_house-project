@@ -58,6 +58,13 @@ export function istMinutes(now: Date = new Date()): number {
   return d.getUTCHours() * 60 + d.getUTCMinutes();
 }
 
+/** "7:05 AM" for an ISO timestamp, in IST (the kitchen's clock). */
+export function istClockTime(iso: string): string {
+  const d = new Date(new Date(iso).getTime() + IST_OFFSET_MS);
+  const h = d.getUTCHours();
+  return `${h % 12 === 0 ? 12 : h % 12}:${pad2(d.getUTCMinutes())} ${h < 12 ? 'AM' : 'PM'}`;
+}
+
 /** Same-day slots close 30 minutes before they start (IST). */
 export function isSlotAvailable(slot: DeliverySlot, isToday: boolean, now: Date = new Date()): boolean {
   if (!isToday) return true;

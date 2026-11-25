@@ -6,7 +6,7 @@ import { Colors, Fonts } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 
 export default function TabsLayout() {
-  const { cartCount } = useApp();
+  const { cartCount, isAdmin } = useApp();
   const insets = useSafeAreaInsets();
   const bottomPad = Math.max(insets.bottom, 8);
 
@@ -47,6 +47,15 @@ export default function TabsLayout() {
         options={{
           title: 'Orders',
           tabBarIcon: ({ color }) => <Icon name="orders" color={color} size={26} />,
+        }}
+      />
+      <Tabs.Screen
+        name="kitchen"
+        options={{
+          title: 'Kitchen',
+          // Admins only. `href: null` hides the tab for everyone else (the server also checks).
+          href: isAdmin ? undefined : null,
+          tabBarIcon: ({ color }) => <Icon name="store" color={color} size={26} />,
         }}
       />
       <Tabs.Screen

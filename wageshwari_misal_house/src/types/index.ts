@@ -56,7 +56,8 @@ export type AddressInput = Omit<Address, 'id' | 'user_id' | 'city' | 'distance_k
 // ---------------------------------------------------------------------------
 // categories & products
 // ---------------------------------------------------------------------------
-export type CategoryName = 'Misal' | 'Thali' | 'Vada Pav' | 'Chaha';
+/** e.g. 'Misal', 'Thali'. Free text: the kitchen can add categories (part 6). */
+export type CategoryName = string;
 
 export interface Category {
   id: ID;
@@ -144,6 +145,10 @@ export interface Order {
   total: Paise;
   payment_method: PaymentMethod;
   payment_status: PaymentStatus;
+  /** Only on cancelled orders: who cancelled it. */
+  cancelled_by?: 'customer' | 'kitchen';
+  /** Only when the kitchen cancelled: the reason shown to the customer. */
+  cancel_reason?: string;
   /** ISO timestamp — standard created_at column. */
   created_at: string;
   /** Joined order_items rows (GET /orders/:id?include=items). */
@@ -178,3 +183,23 @@ export interface PlaceOrderInput {
 export type LoginInput =
   | { method: 'email'; email: string; password: string }
   | { method: 'phone'; phone: string; otp: string };
+
+// ---------------------------------------------------------------------------
+// admin (part 6): GET /admin/orders, /admin/products
+// ---------------------------------------------------------------------------
+export interface StatusHistoryEntry {
+  status: OrderStatus;
+  /** ISO timestamp */
+  at: string;
+  /** "customer", or the admin's email */
+  by: string;
+}
+
+export interface AdminOrder extends Order {
+  status_history: StatusHistoryEntry[];
+}
+
+/** A dish as the kitchen sees it: `is_active: false` = hidden from customers. */
+export interface AdminProduct extends Product {
+  is_active: boolean;
+}

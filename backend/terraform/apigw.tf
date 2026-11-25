@@ -24,6 +24,15 @@ locals {
     "GET /orders"                = { fn = "orders", auth = true }
     "GET /orders/{id}"           = { fn = "orders", auth = true }
     "POST /orders/{id}/cancel"   = { fn = "orders", auth = true }
+    # Admin: the JWT authorizer checks the login; admin.py checks the `admin` group (403 otherwise).
+    "GET /admin/orders"              = { fn = "admin", auth = true }
+    "POST /admin/orders/{id}/status" = { fn = "admin", auth = true }
+    "GET /admin/categories"          = { fn = "admin", auth = true }
+    "POST /admin/categories"         = { fn = "admin", auth = true }
+    "PATCH /admin/categories/{id}"   = { fn = "admin", auth = true }
+    "GET /admin/products"            = { fn = "admin", auth = true }
+    "POST /admin/products"           = { fn = "admin", auth = true }
+    "PATCH /admin/products/{id}"     = { fn = "admin", auth = true }
   }
 }
 

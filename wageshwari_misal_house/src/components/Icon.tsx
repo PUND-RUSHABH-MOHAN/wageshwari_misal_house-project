@@ -22,6 +22,7 @@ const ICONS = {
   chevronDown: { ios: 'chevron.down', md: 'expand_more' },
   chevronUp: { ios: 'chevron.up', md: 'expand_less' },
   chevronRight: { ios: 'chevron.right', md: 'chevron_right' },
+  chevronLeft: { ios: 'chevron.left', md: 'chevron_left' },
   clock: { ios: 'clock.fill', md: 'schedule' },
   phone: { ios: 'phone.fill', md: 'call' },
   mail: { ios: 'envelope.fill', md: 'mail' },

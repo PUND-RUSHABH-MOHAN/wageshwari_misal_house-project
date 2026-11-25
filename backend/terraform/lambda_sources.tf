@@ -4,11 +4,12 @@
 locals {
   lambda_sources = {
     "addresses.py" = join("", [local.lambda_src_addresses_1, local.lambda_src_addresses_2, local.lambda_src_addresses_3, local.lambda_src_addresses_4, local.lambda_src_addresses_5])
+    "admin.py" = join("", [local.lambda_src_admin_1, local.lambda_src_admin_2, local.lambda_src_admin_3, local.lambda_src_admin_4, local.lambda_src_admin_5, local.lambda_src_admin_6])
     "auth.py" = join("", [local.lambda_src_auth_1, local.lambda_src_auth_2, local.lambda_src_auth_3, local.lambda_src_auth_4])
     "catalog.py" = join("", [local.lambda_src_catalog_1, local.lambda_src_catalog_2])
     "common.py" = join("", [local.lambda_src_common_1, local.lambda_src_common_2, local.lambda_src_common_3])
     "me.py" = join("", [local.lambda_src_me])
-    "orders.py" = join("", [local.lambda_src_orders_1, local.lambda_src_orders_2, local.lambda_src_orders_3, local.lambda_src_orders_4, local.lambda_src_orders_5, local.lambda_src_orders_6, local.lambda_src_orders_7])
+    "orders.py" = join("", [local.lambda_src_orders_1, local.lambda_src_orders_2, local.lambda_src_orders_3, local.lambda_src_orders_4, local.lambda_src_orders_5, local.lambda_src_orders_6, local.lambda_src_orders_7, local.lambda_src_orders_8])
     "users.py" = join("", [local.lambda_src_users_1, local.lambda_src_users_2])
   }
 }

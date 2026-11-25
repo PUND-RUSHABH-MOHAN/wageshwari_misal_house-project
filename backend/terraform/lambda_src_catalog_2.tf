@@ -2,6 +2,9 @@
 
 locals {
   lambda_src_catalog_2 = <<PYSRC
+    products = [to_product(i) for i in _query("PRODUCT#") if i.get("is_active", True)]
+    products.sort(key=lambda p: (p["category_id"], p["name"]))
+    return response(200, products, CACHE_HEADERS)
 
 
 ROUTES = {

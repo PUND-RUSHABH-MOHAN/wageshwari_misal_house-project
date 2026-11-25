@@ -6,8 +6,8 @@ Highway, Jalna 431203 (address in `src/constants/shop.ts`). Customers browse the
 place orders (Cash on Delivery; online payment comes later).
 
 > **Current status:** connected to the AWS backend (`../backend/`). Sign-up / login, the menu,
-> saved addresses and orders all use the live API. Still to come: the kitchen/admin screen,
-> online payment, phone OTP login. Section 4 explains where the backend plugs in, and
+> saved addresses, orders and the kitchen/admin screens all use the live API. Still to come:
+> menu photo upload, online payment, phone OTP login. Section 4 explains where the backend plugs in, and
 > section 5 the JSON each screen expects.
 
 ---
@@ -104,6 +104,17 @@ Adding an address needs the phone's GPS position ("Use my current location", `ex
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
 
+**Live (Part 6):** kitchen and menu admin, for accounts in the Cognito `admin` group (how to add one:
+`backend/README.md` → "Make someone an admin"; then log out and in). Admins get:
+- a **Kitchen** tab (hidden for customers): today's or tomorrow's orders grouped by delivery slot, with
+  what to cook (quantities, spice, notes), the receiver's name, a call button and a map button. One button
+  per order moves it on: *Start preparing → Out for delivery → Mark delivered*. **Cancel** asks for a short
+  reason that the customer sees. Counts at the top; re-checks every 20 s while open; pull down to refresh.
+- **Account → Kitchen tools → Manage menu**: every category and dish, hidden ones too. A switch per dish
+  for in stock / sold out; tap a dish or category to edit name, Marathi name, price, description, veg,
+  spice levels, visible; add dishes and categories. New dishes use the category photo for now.
+Customers see the new statuses through the Orders tab's polling, and a kitchen cancellation shows its reason.
+
 **Live (Part 5):** orders. The Orders tab loads `GET /orders` after login (pull down to refresh) and
 re-checks every 20 seconds while an order is in progress and the app is open. **Place Order** sends
 the cart to `POST /orders` with an `Idempotency-Key` header: if the network drops and you tap again
@@ -183,6 +194,10 @@ or *Maps SDK for Android* isn't enabled.
 | Orders | order history | `GET /orders` | **live** (`AppContext` → `loadOrders`) |
 | Orders | live status | `GET /orders` every 20 s while an order is in progress | **live** (polling) |
 | Orders | `cancelOrder()` | `POST /orders/:id/cancel` | **live** |
+| Kitchen (admins) | order board | `GET /admin/orders?date=` | **live** (`src/app/(tabs)/kitchen.tsx`) |
+| Kitchen (admins) | next step / cancel | `POST /admin/orders/:id/status` | **live** |
+| Manage menu (admins) | lists | `GET /admin/categories`, `GET /admin/products` | **live** (`src/app/admin-menu.tsx`) |
+| Manage menu (admins) | add / edit | `POST`/`PATCH /admin/categories`, `POST`/`PATCH /admin/products` | **live** |
 
 The cart is **client-side only** in v1. No cart endpoint is needed.
 
@@ -436,7 +451,8 @@ and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and 
 | Minimum order | ₹100 of food (before delivery and GST) | `src/utils/pricing.ts`, enforced by `backend/src/orders.py` |
 | Time zone | Slots, "today" and kitchen hours use India time (IST) even if the phone is set to another zone | `src/utils/pricing.ts` |
 | Payment | Cash on delivery only until online payment (part 7) | `src/app/(tabs)/cart.tsx`, enforced by the server |
-| Cancelling | Only while `CONFIRMED` (before the kitchen starts) | `AppContext.tsx` → `isCancellable`, enforced by the server |
+| Cancelling | Customers: only while `CONFIRMED` (before the kitchen starts). Kitchen: until delivered, with a reason | `AppContext.tsx` → `isCancellable`, enforced by the server |
+| Order steps (kitchen) | One at a time: Confirmed → Preparing → Out for delivery → Delivered | `KitchenOrderCard.tsx` → `NEXT_STEP`, enforced by the server |
 | Max quantity per add | 20 | `ProductCard.tsx`, `ProductDetailSheet.tsx` |
 | Cooking note | max 120 characters | `SpiceLevelSheet.tsx` |
 | Service area | Within 3 km (straight line) of the hotel, Chandanzira, Jalna | `src/constants/shop.ts`, enforced by `backend/src/addresses.py` |

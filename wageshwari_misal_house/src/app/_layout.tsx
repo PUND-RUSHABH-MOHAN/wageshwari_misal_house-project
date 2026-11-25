@@ -34,6 +34,8 @@ function RootNavigator() {
       {/* Protected routes: expo-router redirects automatically when the guard flips. */}
       <Stack.Protected guard={isLoggedIn}>
         <Stack.Screen name="(tabs)" />
+        {/* Admins only (the screen and the server both check). */}
+        <Stack.Screen name="admin-menu" />
       </Stack.Protected>
       <Stack.Protected guard={!isLoggedIn}>
         <Stack.Screen name="login" />

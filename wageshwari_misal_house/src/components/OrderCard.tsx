@@ -49,12 +49,14 @@ const RANK: Record<OrderStatus, number> = {
   CANCELLED: -2,
 };
 
-export function OrderTimeline({ status }: { status: OrderStatus }) {
+export function OrderTimeline({ status, cancelReason }: { status: OrderStatus; cancelReason?: string }) {
   if (status === 'CANCELLED') {
     return (
       <View style={[styles.notice, { backgroundColor: Colors.dangerSoft }]}>
         <Icon name="close" size={16} color={Colors.danger} />
-        <Text style={[styles.noticeText, { color: Colors.danger }]}>This order was cancelled.</Text>
+        <Text style={[styles.noticeText, { color: Colors.danger }]}>
+          {cancelReason ? `The kitchen cancelled this order: ${cancelReason}` : 'This order was cancelled.'}
+        </Text>
       </View>
     );
   }
@@ -151,7 +153,7 @@ export function OrderCard({
           <View style={styles.divider} />
 
           <Text style={styles.blockTitle}>Order status</Text>
-          <OrderTimeline status={order.status} />
+          <OrderTimeline status={order.status} cancelReason={order.cancel_reason} />
 
           <View style={styles.divider} />
           <Text style={styles.blockTitle}>Delivery</Text>
