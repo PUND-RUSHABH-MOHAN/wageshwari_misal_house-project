@@ -1,21 +1,54 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Icon } from '@/components/Icon';
 import { OrderCard } from '@/components/OrderCard';
-import { EmptyState } from '@/components/ui';
+import { Button, EmptyState } from '@/components/ui';
 import { HOME_HREF } from '@/constants/routes';
 import { Colors, Fonts, Radius, Shadow, Spacing } from '@/constants/theme';
 import { isTerminalStatus, useApp } from '@/context/AppContext';
-import type { ID } from '@/types';
+import { errorMessage } from '@/services/api';
+import type { ID, Order } from '@/types';
 import { formatCurrency } from '@/utils/format';
 
 export default function OrdersScreen() {
-  const { orders, lastPlacedOrderId, dismissOrderBanner, cancelOrder } = useApp();
+  const { orders, ordersStatus, ordersError, reloadOrders, lastPlacedOrderId, dismissOrderBanner, cancelOrder } =
+    useApp();
   const [expandedId, setExpandedId] = useState<ID | null>(null);
   const [prevPlacedId, setPrevPlacedId] = useState<ID | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [cancellingId, setCancellingId] = useState<ID | null>(null);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await reloadOrders();
+    setRefreshing(false);
+  };
+
+  const confirmCancel = (order: Order) => {
+    Alert.alert('Cancel this order?', `${order.order_number} · ${formatCurrency(order.total)}`, [
+      { text: 'Keep order', style: 'cancel' },
+      {
+        text: 'Cancel order',
+        style: 'destructive',
+        onPress: async () => {
+          setCancellingId(order.id);
+          try {
+            await cancelOrder(order.id); // POST /orders/:id/cancel
+          } catch (e) {
+            Alert.alert("Couldn't cancel", errorMessage(e));
+          } finally {
+            setCancellingId(null);
+          }
+        },
+      },
+    ]);
+  };
+
+  const firstLoad = orders.length === 0 && (ordersStatus === 'loading' || ordersStatus === 'idle');
+  const loadFailed = orders.length === 0 && ordersStatus === 'error';
 
   // Auto-expand a freshly placed order (state derived during render, no effect needed).
   if (lastPlacedOrderId !== prevPlacedId) {
@@ -31,7 +64,9 @@ export default function OrdersScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>My Orders</Text>
         <Text style={styles.subtitle}>
-          {orders.length === 0
+          {firstLoad
+            ? 'Loading…'
+            : orders.length === 0
             ? 'No orders yet'
             : `${orders.length} order${orders.length > 1 ? 's' : ''}${activeCount ? ` · ${activeCount} in progress` : ''}`}
         </Text>
@@ -58,21 +93,34 @@ export default function OrdersScreen() {
         keyExtractor={(o) => o.id}
         contentContainerStyle={[styles.list, orders.length === 0 && styles.flexGrow]}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         ListEmptyComponent={
-          <EmptyState
-            emoji="🧾"
-            title="No orders yet"
-            message="Your misal journey starts here. Place your first order and track it live."
-            actionLabel="Browse Menu"
-            onAction={() => router.navigate(HOME_HREF)}
-          />
+          firstLoad ? (
+            <View style={styles.center}>
+              <ActivityIndicator color={Colors.primary} />
+            </View>
+          ) : loadFailed ? (
+            <View style={styles.center}>
+              <Text style={styles.errorText}>{ordersError}</Text>
+              <Button title="Retry" variant="outline" onPress={() => reloadOrders()} />
+            </View>
+          ) : (
+            <EmptyState
+              emoji="🧾"
+              title="No orders yet"
+              message="Your misal journey starts here. Place your first order and track it live."
+              actionLabel="Browse Menu"
+              onAction={() => router.navigate(HOME_HREF)}
+            />
+          )
         }
         renderItem={({ item }) => (
           <OrderCard
             order={item}
             expanded={expandedId === item.id}
             onToggle={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
-            onCancel={() => cancelOrder(item.id)}
+            onCancel={() => confirmCancel(item)}
+            cancelling={cancellingId === item.id}
           />
         )}
       />
@@ -102,4 +150,6 @@ const styles = StyleSheet.create({
   bannerText: { color: '#E8F5E9', fontSize: 12, marginTop: 2 },
   list: { padding: Spacing.lg, paddingBottom: Spacing.xxl },
   separator: { height: Spacing.md },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: Spacing.md, padding: Spacing.xl },
+  errorText: { fontSize: 14, color: Colors.textMuted, textAlign: 'center' },
 });

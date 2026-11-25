@@ -20,6 +20,10 @@ locals {
     "POST /addresses"            = { fn = "addresses", auth = true }
     "PATCH /addresses/{id}"      = { fn = "addresses", auth = true }
     "DELETE /addresses/{id}"     = { fn = "addresses", auth = true }
+    "POST /orders"               = { fn = "orders", auth = true }
+    "GET /orders"                = { fn = "orders", auth = true }
+    "GET /orders/{id}"           = { fn = "orders", auth = true }
+    "POST /orders/{id}/cancel"   = { fn = "orders", auth = true }
   }
 }
 

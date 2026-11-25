@@ -2,6 +2,9 @@
 #   PK = "USER#<cognito sub>", SK = "PROFILE"       user profile (this part)
 #   PK = "USER#<cognito sub>", SK = "ADDRESS#<id>"  addresses (part 4)
 #   PK = "USER#<cognito sub>", SK = "ORDER#<id>"    orders (part 5)
+#   PK = "USER#<cognito sub>", SK = "IDEMP#<key>"   "no double orders" records (part 5, expire)
+#   PK = "COUNTER",            SK = "ORDER#<date>"  daily order-number counter (part 5)
+#   PK = "CATALOG",            SK = "CATEGORY#/PRODUCT#<id>"  the menu (part 3)
 # GSIs get added here when later parts need other access patterns.
 
 resource "aws_dynamodb_table" "main" {
@@ -19,6 +22,14 @@ resource "aws_dynamodb_table" "main" {
   attribute {
     name = "SK"
     type = "S"
+  }
+
+  # TTL: DynamoDB deletes an item for free some time (usually within 48 h) after the epoch
+  # seconds in `expires_at` pass. Only items that have the attribute are affected; today
+  # that is just the idempotency records. Code still checks expiry itself.
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
   }
 
   # Continuous backups: restore the table to any second in the last 35 days.

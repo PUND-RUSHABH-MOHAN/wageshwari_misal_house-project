@@ -21,6 +21,17 @@ locals {
       handler = "addresses.handler"
       files   = ["common.py", "users.py", "addresses.py"]
     }
+    orders = {
+      handler = "orders.handler"
+      files   = ["common.py", "users.py", "addresses.py", "orders.py"]
+    }
+  }
+
+  # Settings only one function needs, so the others aren't redeployed when they change.
+  function_env = {
+    orders = {
+      MIN_ORDER_PAISE = tostring(var.min_order_paise)
+    }
   }
 }
 
@@ -59,7 +70,7 @@ resource "aws_lambda_function" "fn" {
   timeout          = 10
 
   environment {
-    variables = {
+    variables = merge({
       TABLE_NAME          = aws_dynamodb_table.main.name
       USER_POOL_CLIENT_ID = aws_cognito_user_pool_client.app.id
       LOG_LEVEL           = "INFO"
@@ -67,7 +78,7 @@ resource "aws_lambda_function" "fn" {
       SHOP_LONGITUDE      = tostring(var.shop_longitude)
       DELIVERY_RADIUS_KM  = tostring(var.delivery_radius_km)
       SHOP_CITY           = var.shop_city
-    }
+    }, try(local.function_env[each.key], {}))
   }
 
   logging_config {

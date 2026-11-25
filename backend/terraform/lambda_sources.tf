@@ -8,6 +8,7 @@ locals {
     "catalog.py" = join("", [local.lambda_src_catalog_1, local.lambda_src_catalog_2])
     "common.py" = join("", [local.lambda_src_common_1, local.lambda_src_common_2, local.lambda_src_common_3])
     "me.py" = join("", [local.lambda_src_me])
+    "orders.py" = join("", [local.lambda_src_orders_1, local.lambda_src_orders_2, local.lambda_src_orders_3, local.lambda_src_orders_4, local.lambda_src_orders_5, local.lambda_src_orders_6, local.lambda_src_orders_7])
     "users.py" = join("", [local.lambda_src_users_1, local.lambda_src_users_2])
   }
 }

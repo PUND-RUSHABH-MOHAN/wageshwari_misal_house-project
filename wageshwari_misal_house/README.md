@@ -3,12 +3,12 @@
 A food-ordering app for **Wagheshwar Misal House**, A/P Chandanzira, Jalna – Chh. Sambhajinagar
 Highway, Jalna 431203 (address in `src/constants/shop.ts`). Customers browse the menu
 (Misal, Thali, Vada Pav, Chaha), pick a spice level, choose a delivery slot and
-place orders (Cash on Delivery / Online).
+place orders (Cash on Delivery; online payment comes later).
 
-> **Current status:** the UI and app flow are complete. The app runs on
-> **built-in mock data**. There is **no backend connection yet**: no base URL and
-> no HTTP calls. The "API integration" section below explains exactly where the
-> backend plugs in, and the JSON format each screen expects.
+> **Current status:** connected to the AWS backend (`../backend/`). Sign-up / login, the menu,
+> saved addresses and orders all use the live API. Still to come: the kitchen/admin screen,
+> online payment, phone OTP login. Section 4 explains where the backend plugs in, and
+> section 5 the JSON each screen expects.
 
 ---
 
@@ -53,7 +53,7 @@ src/
 │       └── profile.tsx       # Profile + saved addresses
 ├── components/               # Reusable UI (ProductCard, ProductDetailSheet, BottomSheet, …)
 ├── context/AppContext.tsx    # ★ Global state + every action that will become an API call
-├── data/mock-data.ts         # ★ Mock data (same shape as API responses) + bundled images
+├── data/mock-data.ts         # Bundled images: logo, login background, fallback food photos
 ├── types/index.ts            # ★ Data models = the JSON contract with the backend
 ├── utils/pricing.ts          # Bill calculation, delivery fee, GST, delivery slots, kitchen hours
 ├── utils/format.ts           # Currency (paise → ₹), dates, spice labels, validators
@@ -73,8 +73,8 @@ npx tsc --noEmit        # type-check
 npx expo lint           # lint
 ```
 
-> Login is mocked. Any valid email + password (6+ characters), or any 10-digit
-> mobile number + any 4-digit OTP, logs in as the demo user.
+> Login uses the real backend: sign up with a real email (a 6-digit code is emailed), then log in.
+> Password: 8+ characters with a lowercase letter and a number.
 
 ---
 
@@ -88,7 +88,7 @@ npx expo lint           # lint
 | `eas.json` | The same variable for EAS cloud builds (`preview`, `production`). |
 | `src/services/api.ts` | The only place that calls `fetch`. One function per endpoint; every failure becomes an `ApiError` with the backend's `code` and `message`. |
 | `src/services/session.ts` | Tokens. The refresh token (30 days) is kept in the OS keystore with `expo-secure-store`; the ID token (1 hour) only in memory, renewed automatically. |
-| `src/context/AppContext.tsx` | Screens call `useApp()`. Auth, profile and the menu call the API; the rest is still mock data. |
+| `src/context/AppContext.tsx` | Screens call `useApp()`. Everything server-side calls the API; only the cart lives on the phone. |
 
 **Live (Part 2):** sign-up, email-code confirmation, login, remembered login across restarts,
 silent token refresh, forgot/reset password, `GET`/`PATCH /me`, logout (revokes the refresh token).
@@ -104,8 +104,15 @@ Adding an address needs the phone's GPS position ("Use my current location", `ex
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
 
-**Still mock data until its backend part lands:** orders (part 5). They live in memory and
-reset when the app restarts.
+**Live (Part 5):** orders. The Orders tab loads `GET /orders` after login (pull down to refresh) and
+re-checks every 20 seconds while an order is in progress and the app is open. **Place Order** sends
+the cart to `POST /orders` with an `Idempotency-Key` header: if the network drops and you tap again
+with the same cart, the server returns the first order instead of making a second one. The server
+re-checks everything (prices from the menu, slot, address, stock) and its message is shown above the
+button if it refuses; if a dish has sold out, the menu reloads and the cart marks it **Sold out**.
+Cancel asks for confirmation and calls `POST /orders/:id/cancel`. Cash on delivery only for now
+("UPI / Online" shows as coming soon). Minimum order ₹100 of food: below that the cart says how much
+to add and the button stays disabled.
 Phone + OTP login is removed from the login screen until part 8.
 
 ### 4.2 Running against the backend
@@ -166,16 +173,16 @@ or *Maps SDK for Android* isn't enabled.
 | Login | `login()` | `POST /auth/login` (email) · `POST /auth/otp/verify` (phone) | `AppContext.tsx` → `LOGIN` |
 | Profile | `logout()` | `POST /auth/logout` | `AppContext.tsx` → `LOGOUT` |
 | Home | initial data | `GET /categories`, `GET /products` | **live** (`AppContext` → `loadCatalog`) |
-| Profile | current user | `GET /me` | `mock-data.ts` → `MOCK_USER` |
+| Profile | current user | `GET /me` | **live** (restored at startup) |
 | Profile | `updateUser()` | `PATCH /me` | `AppContext.tsx` → `UPDATE_USER` |
 | Profile / Cart | addresses list | `GET /addresses` | **live** (`AppContext` → `loadAddresses`) |
 | Profile / Cart | `saveAddress()` | `POST /addresses` (new) · `PATCH /addresses/:id` (edit) | **live** |
 | Profile | `deleteAddress()` | `DELETE /addresses/:id` | **live** |
 | Profile | `setDefaultAddress()` | `PATCH /addresses/:id` `{ "is_default": true }` | **live** |
-| Cart | `placeOrder()` | `POST /orders` | `AppContext.tsx` → `PLACE_ORDER` |
-| Orders | order history | `GET /orders` | `mock-data.ts` → `buildSeedOrders()` |
-| Orders | live status | `GET /orders/:id` (polling) or a websocket | `AppContext.tsx` → `ADVANCE_LIVE_ORDERS` |
-| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | `AppContext.tsx` → `CANCEL_ORDER` |
+| Cart | `placeOrder()` | `POST /orders` (+ `Idempotency-Key` header) | **live** |
+| Orders | order history | `GET /orders` | **live** (`AppContext` → `loadOrders`) |
+| Orders | live status | `GET /orders` every 20 s while an order is in progress | **live** (polling) |
+| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | **live** |
 
 The cart is **client-side only** in v1. No cart endpoint is needed.
 
@@ -307,11 +314,14 @@ cart lives on the device:
 }
 ```
 
-- `payment_method`: `"cod"` | `"online"`
+- Header `Idempotency-Key`: a random string (8–64 of `A-Z a-z 0-9 _ -`), the same for retries of one checkout.
+- `payment_method`: `"cod"` | `"online"` (online is refused until part 7)
 - `spice_level`: `"mild"` | `"medium"` | `"teekha"`. Only for products with `has_spice_level: true`.
 - `note`: optional, max 120 characters
+- `delivery_date`: today or tomorrow in India time; `slot_label` exactly as `slotLabel()` builds it.
+- Prices are **not** sent; the server takes them from the menu. Food subtotal must be at least ₹100.
 
-Response: the created **Order** (see 5.5).
+Response: the created **Order** (see 5.5). Full rules and error codes: `backend/README.md`.
 
 ### 5.5 Orders screen
 
@@ -423,6 +433,10 @@ and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and 
 | Delivery slots | Early Bird 7–8, Morning 8–9, Breakfast 9–10, Brunch 10–11, Lunch 12–1 | `src/utils/pricing.ts` |
 | Same-day slot cut-off | A slot closes 30 minutes before it starts | `src/utils/pricing.ts` |
 | Delivery fee / GST | ₹30 flat / 5% | `src/utils/pricing.ts` |
+| Minimum order | ₹100 of food (before delivery and GST) | `src/utils/pricing.ts`, enforced by `backend/src/orders.py` |
+| Time zone | Slots, "today" and kitchen hours use India time (IST) even if the phone is set to another zone | `src/utils/pricing.ts` |
+| Payment | Cash on delivery only until online payment (part 7) | `src/app/(tabs)/cart.tsx`, enforced by the server |
+| Cancelling | Only while `CONFIRMED` (before the kitchen starts) | `AppContext.tsx` → `isCancellable`, enforced by the server |
 | Max quantity per add | 20 | `ProductCard.tsx`, `ProductDetailSheet.tsx` |
 | Cooking note | max 120 characters | `SpiceLevelSheet.tsx` |
 | Service area | Within 3 km (straight line) of the hotel, Chandanzira, Jalna | `src/constants/shop.ts`, enforced by `backend/src/addresses.py` |

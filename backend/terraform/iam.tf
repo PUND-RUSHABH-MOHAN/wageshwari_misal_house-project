@@ -29,7 +29,7 @@ data "aws_iam_policy_document" "lambda" {
     sid = "AppTable"
     actions = [
       "dynamodb:GetItem",
-      "dynamodb:PutItem",
+      "dynamodb:PutItem", # also covers the Put steps inside orders' TransactWriteItems
       "dynamodb:UpdateItem",
       "dynamodb:Query",      # catalog: read the whole menu partition in one call
       "dynamodb:DeleteItem", # addresses: DELETE /addresses/{id}

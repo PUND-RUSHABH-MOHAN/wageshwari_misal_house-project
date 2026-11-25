@@ -1,13 +1,12 @@
 /**
  * Global client-side store (React Context + useReducer).
  *
- * Auth, the profile, the menu and saved addresses talk to the real backend
- * (src/services/api.ts + session.ts). Orders are still local mock data: each action's
- * comment names the endpoint it will be replaced by (roadmap part 5).
+ * Everything server-side goes through the real backend (src/services/api.ts + session.ts):
+ * auth, the profile, the menu, saved addresses and orders. Only the cart lives on the phone.
  */
 import { createContext, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
+import { AppState as RNAppState } from 'react-native';
 
-import { buildSeedOrders } from '@/data/mock-data';
 import {
   addressApi,
   authApi,
@@ -15,8 +14,10 @@ import {
   errorMessage,
   isApiError,
   meApi,
+  orderApi,
   type CodeDelivery,
   type MePatch,
+  type PlaceOrderBody,
   type RegisterInput,
 } from '@/services/api';
 import {
@@ -34,14 +35,12 @@ import type {
   Category,
   ID,
   Order,
-  OrderItem,
   OrderStatus,
   PlaceOrderInput,
   Product,
   SpiceLevel,
   User,
 } from '@/types';
-import { toCompactDate } from '@/utils/format';
 import { computeBill } from '@/utils/pricing';
 
 // ---------------------------------------------------------------------------
@@ -63,13 +62,14 @@ interface AppState {
   addressesStatus: LoadStatus;
   addressesError: string | null;
   cart: CartItem[];
+  /** GET /orders, newest first. */
   orders: Order[];
+  ordersStatus: LoadStatus;
+  ordersError: string | null;
   /** Address chosen for checkout; falls back to the default address. */
   selectedAddressId: ID | null;
   /** Drives the "Order placed" banner on the Orders tab. */
   lastPlacedOrderId: ID | null;
-  /** Orders placed this session whose status the mock "kitchen" advances. */
-  liveOrderIds: ID[];
 }
 
 const initialState: AppState = {
@@ -84,10 +84,11 @@ const initialState: AppState = {
   addressesStatus: 'idle',
   addressesError: null,
   cart: [],
-  orders: buildSeedOrders(),
+  orders: [],
+  ordersStatus: 'idle',
+  ordersError: null,
   selectedAddressId: null,
   lastPlacedOrderId: null,
-  liveOrderIds: [],
 };
 
 export type CatalogStatus = 'loading' | 'ready' | 'error';
@@ -105,9 +106,11 @@ type Action =
   | { type: 'UPDATE_CART_ITEM'; id: ID; patch: Pick<CartItem, 'note' | 'spice_level'> }
   | { type: 'REMOVE_CART_ITEM'; id: ID }
   | { type: 'CLEAR_CART' }
-  | { type: 'PLACE_ORDER'; order: Order }
-  | { type: 'ADVANCE_LIVE_ORDERS' }
-  | { type: 'CANCEL_ORDER'; id: ID }
+  | { type: 'ORDERS_LOADING' }
+  | { type: 'ORDERS_LOADED'; orders: Order[] }
+  | { type: 'ORDERS_FAILED'; message: string }
+  | { type: 'ORDER_PLACED'; order: Order }
+  | { type: 'ORDER_UPDATED'; order: Order }
   | { type: 'DISMISS_ORDER_BANNER' }
   | { type: 'SET_USER'; user: User }
   | { type: 'ADDRESSES_LOADING' }
@@ -126,38 +129,22 @@ const sameLine = (a: CartItem, b: CartItem) =>
   a.spice_level === b.spice_level &&
   (a.note ?? '').trim() === (b.note ?? '').trim();
 
-/** WMH-YYYYMMDD-NNNN with a per-day running sequence. */
-function nextOrderNumber(orders: Order[], date: Date): string {
-  const prefix = `WMH-${toCompactDate(date)}-`;
-  const maxSeq = orders
-    .filter((o) => o.order_number.startsWith(prefix))
-    .reduce((max, o) => Math.max(max, Number(o.order_number.slice(prefix.length)) || 0), 0);
-  return `${prefix}${String(maxSeq + 1).padStart(4, '0')}`;
-}
-
-/** Linear lifecycle used by the mock kitchen simulator. */
-export const ORDER_FLOW: OrderStatus[] = [
-  'PENDING_PAYMENT',
-  'CONFIRMED',
-  'PREPARING',
-  'OUT_FOR_DELIVERY',
-  'DELIVERED',
-];
-
 export const isTerminalStatus = (s: OrderStatus) => s === 'DELIVERED' || s === 'CANCELLED';
+/** Same rule as the server: cancel only before the kitchen starts. */
 export const isCancellable = (o: Order) => o.status === 'PENDING_PAYMENT' || o.status === 'CONFIRMED';
 
-function advanceOrder(order: Order): Order {
-  if (isTerminalStatus(order.status)) return order;
-  const next = ORDER_FLOW[ORDER_FLOW.indexOf(order.status) + 1];
-  // Online: gateway success moves PENDING_PAYMENT -> CONFIRMED + paid.
-  // COD: cash collected on delivery.
-  const paid =
-    order.payment_status === 'paid' ||
-    (order.payment_method === 'online' && next === 'CONFIRMED') ||
-    next === 'DELIVERED';
-  return { ...order, status: next, payment_status: paid ? 'paid' : 'pending' };
-}
+/** A random Idempotency-Key for one checkout (8–64 of A-Z a-z 0-9 _ -). */
+const newCheckoutKey = () =>
+  `chk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`;
+
+/** The cart as POST /orders wants it. */
+const toOrderLines = (cart: CartItem[]): PlaceOrderBody['items'] =>
+  cart.map((c) => ({
+    product_id: c.product_id,
+    quantity: c.quantity,
+    ...(c.product.has_spice_level && c.spice_level ? { spice_level: c.spice_level } : {}),
+    ...(c.note?.trim() ? { note: c.note.trim() } : {}),
+  }));
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -203,6 +190,9 @@ function reducer(state: AppState, action: Action): AppState {
         currentUser: action.user,
         addresses: [],
         addressesStatus: 'idle',
+        orders: [],
+        ordersStatus: 'idle',
+        ordersError: null,
         selectedAddressId: null,
       };
 
@@ -214,6 +204,9 @@ function reducer(state: AppState, action: Action): AppState {
         addresses: [],
         addressesStatus: 'idle',
         addressesError: null,
+        orders: [],
+        ordersStatus: 'idle',
+        ordersError: null,
         selectedAddressId: null,
         lastPlacedOrderId: null,
       };
@@ -252,34 +245,26 @@ function reducer(state: AppState, action: Action): AppState {
     case 'CLEAR_CART':
       return { ...state, cart: [] };
 
-    case 'PLACE_ORDER': // POST /orders
+    case 'ORDERS_LOADING':
+      return { ...state, ordersStatus: 'loading', ordersError: null };
+
+    case 'ORDERS_LOADED': // GET /orders
+      return { ...state, orders: action.orders, ordersStatus: 'ready', ordersError: null };
+
+    case 'ORDERS_FAILED':
+      // Keep any orders already on screen; only the status changes.
+      return { ...state, ordersStatus: 'error', ordersError: action.message };
+
+    case 'ORDER_PLACED': // POST /orders
       return {
         ...state,
-        orders: [action.order, ...state.orders],
+        orders: [action.order, ...state.orders.filter((o) => o.id !== action.order.id)],
         cart: [],
         lastPlacedOrderId: action.order.id,
-        liveOrderIds: [...state.liveOrderIds, action.order.id],
       };
 
-    case 'ADVANCE_LIVE_ORDERS': {
-      // Stand-in for websocket / polling GET /orders/:id
-      const live = new Set(state.liveOrderIds);
-      const orders = state.orders.map((o) => (live.has(o.id) ? advanceOrder(o) : o));
-      const liveOrderIds = state.liveOrderIds.filter((id) => {
-        const o = orders.find((x) => x.id === id);
-        return o !== undefined && !isTerminalStatus(o.status);
-      });
-      return { ...state, orders, liveOrderIds };
-    }
-
-    case 'CANCEL_ORDER': // POST /orders/:id/cancel
-      return {
-        ...state,
-        orders: state.orders.map((o) =>
-          o.id === action.id && isCancellable(o) ? { ...o, status: 'CANCELLED' } : o,
-        ),
-        liveOrderIds: state.liveOrderIds.filter((id) => id !== action.id),
-      };
+    case 'ORDER_UPDATED': // POST /orders/:id/cancel
+      return { ...state, orders: state.orders.map((o) => (o.id === action.order.id ? action.order : o)) };
 
     case 'DISMISS_ORDER_BANNER':
       return { ...state, lastPlacedOrderId: null };
@@ -341,6 +326,10 @@ interface AppContextValue {
   reloadAddresses: () => Promise<void>;
   cart: CartItem[];
   orders: Order[];
+  ordersStatus: LoadStatus;
+  ordersError: string | null;
+  /** Re-fetch GET /orders (pull-to-refresh, Retry). Never throws. */
+  reloadOrders: () => Promise<void>;
   lastPlacedOrderId: ID | null;
   // derived
   cartCount: number;
@@ -366,9 +355,11 @@ interface AppContextValue {
   updateCartItem: (cartItemId: ID, patch: Pick<CartItem, 'note' | 'spice_level'>) => void;
   removeFromCart: (cartItemId: ID) => void;
   clearCart: () => void;
-  // orders
-  placeOrder: (input: PlaceOrderInput) => Order;
-  cancelOrder: (orderId: ID) => void;
+  // orders (throw ApiError; screens show `error.message`)
+  /** POST /orders with the current cart. Clears the cart on success. */
+  placeOrder: (input: PlaceOrderInput) => Promise<Order>;
+  /** POST /orders/:id/cancel. */
+  cancelOrder: (orderId: ID) => Promise<void>;
   dismissOrderBanner: () => void;
   // addresses (the async ones throw ApiError; screens show `error.message`)
   /** POST /addresses (no id) or PATCH /addresses/:id. A new address is selected for checkout. */
@@ -380,14 +371,20 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-/** How often the mock kitchen moves live orders one step forward. */
-const KITCHEN_TICK_MS = 15000;
+/** How often GET /orders is re-checked while an order is in progress (app in foreground). */
+const ORDER_POLL_MS = 20000;
 const ORDER_BANNER_MS = 8000;
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   /** Email + password from sign-up / an unconfirmed login. Never persisted. */
   const pendingLogin = useRef<{ email: string; password: string } | null>(null);
+  /**
+   * Idempotency-Key of a checkout that hasn't succeeded yet, with the exact body it was sent
+   * with. Retrying the same body reuses the key (no double order if the first request did
+   * reach the server); any change to the cart, slot or address gets a fresh key.
+   */
+  const checkout = useRef<{ key: string; body: string } | null>(null);
 
   // GET /categories + GET /products. Public, so it starts at launch alongside the session check.
   const loadCatalog = async () => {
@@ -415,6 +412,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // GET /orders. `quiet` (polling) leaves the status alone and ignores failures.
+  const loadOrders = async (quiet = false) => {
+    if (!quiet) dispatch({ type: 'ORDERS_LOADING' });
+    try {
+      const orders = await withAuth((t) => orderApi.list(t));
+      dispatch({ type: 'ORDERS_LOADED', orders });
+    } catch (e) {
+      if (!quiet) dispatch({ type: 'ORDERS_FAILED', message: errorMessage(e) });
+    }
+  };
+
   // Startup: restore a saved session, and drop back to login if it ever expires.
   useEffect(() => {
     setSessionExpiredHandler(() => dispatch({ type: 'LOGOUT' }));
@@ -425,7 +433,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const user = restored === 'restored' ? await withAuth((t) => meApi.get(t)) : null;
         if (!cancelled) {
           dispatch({ type: 'AUTH_READY', user });
-          if (user) loadAddresses();
+          if (user) {
+            loadAddresses();
+            loadOrders();
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -450,15 +461,39 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await startSession(res);
     pendingLogin.current = null;
     dispatch({ type: 'LOGIN', user: res.user });
-    loadAddresses(); // not awaited: login finishes as soon as the tokens are stored
+    // Not awaited: login finishes as soon as the tokens are stored.
+    loadAddresses();
+    loadOrders();
   };
 
-  const hasLiveOrders = state.liveOrderIds.length > 0;
+  // While an order is in progress, re-check GET /orders every 20 s so status changes made in
+  // the kitchen (part 6) show up. Paused while the app is in the background.
+  const signedIn = state.currentUser !== null;
+  const hasActiveOrders = state.orders.some((o) => !isTerminalStatus(o.status));
   useEffect(() => {
-    if (!hasLiveOrders) return;
-    const timer = setInterval(() => dispatch({ type: 'ADVANCE_LIVE_ORDERS' }), KITCHEN_TICK_MS);
-    return () => clearInterval(timer);
-  }, [hasLiveOrders]);
+    if (!signedIn || !hasActiveOrders) return;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (!timer) timer = setInterval(() => loadOrders(true), ORDER_POLL_MS);
+    };
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
+    if (RNAppState.currentState === 'active') start();
+    const sub = RNAppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        loadOrders(true); // catch up straight away when coming back
+        start();
+      } else {
+        stop();
+      }
+    });
+    return () => {
+      stop();
+      sub.remove();
+    };
+  }, [signedIn, hasActiveOrders]);
 
   // Auto-hide the "order placed" banner after a few seconds.
   useEffect(() => {
@@ -467,11 +502,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(timer);
   }, [state.lastPlacedOrderId]);
 
-  const userOrders = state.currentUser
-    ? state.orders
-        .filter((o) => o.user_id === state.currentUser?.id)
-        .sort((a, b) => b.created_at.localeCompare(a.created_at))
-    : [];
+  const userOrders = state.currentUser ? state.orders : [];
   const userAddresses = state.currentUser
     ? state.addresses.filter((a) => a.user_id === state.currentUser?.id)
     : [];
@@ -494,6 +525,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     reloadAddresses: () => loadAddresses(),
     cart: state.cart,
     orders: userOrders,
+    ordersStatus: state.ordersStatus,
+    ordersError: state.ordersError,
+    reloadOrders: () => loadOrders(),
     lastPlacedOrderId: state.lastPlacedOrderId,
 
     cartCount: state.cart.reduce((n, c) => n + c.quantity, 0),
@@ -572,45 +606,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     removeFromCart: (id) => dispatch({ type: 'REMOVE_CART_ITEM', id }),
     clearCart: () => dispatch({ type: 'CLEAR_CART' }),
 
-    placeOrder: (input) => {
-      const user = state.currentUser;
-      const address = userAddresses.find((a) => a.id === input.address_id);
-      if (!user) throw new Error('You must be logged in to place an order.');
-      if (!address) throw new Error('Please select a delivery address.');
+    placeOrder: async (input) => {
       if (state.cart.length === 0) throw new Error('Your cart is empty.');
-
-      const now = new Date();
-      const orderId = newId('ord');
-      const bill = computeBill(state.cart);
-      const items: OrderItem[] = state.cart.map((c) => ({
-        id: newId('oit'),
-        order_id: orderId,
-        product_id: c.product_id,
-        product_name: c.product.name,
-        unit_price: c.product.price,
-        quantity: c.quantity,
-        spice_level: c.spice_level,
-        note: c.note,
-        line_total: c.product.price * c.quantity,
-      }));
-      const order: Order = {
-        id: orderId,
-        order_number: nextOrderNumber(state.orders, now),
-        user_id: user.id,
-        address_snapshot: { ...address },
-        delivery_date: input.delivery_date,
-        slot_label: input.slot_label,
-        status: input.payment_method === 'online' ? 'PENDING_PAYMENT' : 'CONFIRMED',
-        ...bill,
-        payment_method: input.payment_method,
-        payment_status: 'pending',
-        created_at: now.toISOString(),
-        items,
-      };
-      dispatch({ type: 'PLACE_ORDER', order });
-      return order;
+      const body: PlaceOrderBody = { ...input, items: toOrderLines(state.cart) };
+      const bodyJson = JSON.stringify(body);
+      if (!checkout.current || checkout.current.body !== bodyJson) {
+        checkout.current = { key: newCheckoutKey(), body: bodyJson };
+      }
+      const key = checkout.current.key;
+      try {
+        const order = await withAuth((t) => orderApi.create(t, body, key)); // POST /orders
+        checkout.current = null;
+        dispatch({ type: 'ORDER_PLACED', order });
+        return order;
+      } catch (e) {
+        // A dish went off the menu or sold out: refresh the menu so the cart shows it.
+        if (isApiError(e) && e.code === 'PRODUCT_UNAVAILABLE') loadCatalog();
+        throw e;
+      }
     },
-    cancelOrder: (id) => dispatch({ type: 'CANCEL_ORDER', id }),
+    cancelOrder: async (id) => {
+      try {
+        const order = await withAuth((t) => orderApi.cancel(t, id)); // POST /orders/:id/cancel
+        dispatch({ type: 'ORDER_UPDATED', order });
+      } catch (e) {
+        // e.g. the kitchen started it meanwhile: show the real status.
+        if (isApiError(e) && e.code === 'ORDER_NOT_CANCELLABLE') loadOrders(true);
+        throw e;
+      }
+    },
     dismissOrderBanner: () => dispatch({ type: 'DISMISS_ORDER_BANNER' }),
 
     saveAddress: async (input) => {

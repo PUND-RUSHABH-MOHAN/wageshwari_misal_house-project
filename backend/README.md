@@ -7,6 +7,7 @@ Status:
 - **Part 1, auth**: deployed 2026-11-18.
 - **Part 3, menu + photos**: deployed 2026-11-24. API `https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com`, photos `https://d2n5hm5b49hk3p.cloudfront.net`.
 - **Part 4, saved addresses**: 3 km GPS delivery area around the hotel (19.856833, 75.851944).
+- **Part 5, orders**: place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
 
 ```
 backend/
@@ -16,28 +17,30 @@ backend/
 │   ├── auth.py              /auth/* routes
 │   ├── me.py                /me routes
 │   ├── catalog.py           /categories, /products (the menu)
-│   └── addresses.py         /addresses (saved delivery addresses, 3 km check)
+│   ├── addresses.py         /addresses (saved delivery addresses, 3 km check)
+│   └── orders.py            /orders (place, list, view, cancel)
 ├── tests/                   pytest + moto (no AWS account touched)
 ├── scripts/
 │   ├── gen_lambda_sources.py   src/*.py  ->  terraform/lambda_src_*.tf
 │   ├── verify-auth.ps1         end-to-end check of auth against the deployed API
 │   ├── verify-catalog.ps1      check of the menu API + CloudFront photos
-│   └── verify-addresses.ps1    check of the addresses API with a real account
+│   ├── verify-addresses.ps1    check of the addresses API with a real account
+│   └── verify-orders.ps1       places one real order for tomorrow, then cancels it
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (63 resources)
+## What gets created (71 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
 | Cognito User Pool | `wmh-users` | The user directory. Stores emails and password hashes, emails the confirmation and reset codes, issues JWTs. |
 | Cognito app client | `wmh-app` | How the mobile app identifies itself to the pool. Public (no secret), because anything in an APK can be extracted. |
 | Cognito group | `admin` | Members get `role: "admin"` (used from Part 6). |
-| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`) and the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`); addresses and orders later. On-demand billing, point-in-time recovery. |
+| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). |
 | Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
-| IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query items in `wmh-main`. Nothing else. |
-| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`. |
-| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 16 routes, a JWT authorizer on `/me` and `/addresses`, throttled to 50 req/s (burst 100). |
+| IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query/delete items in `wmh-main`. Nothing else. |
+| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`. |
+| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 20 routes, a JWT authorizer on `/me`, `/addresses` and `/orders`, throttled to 50 req/s (burst 100). |
 | S3 bucket | `wmh-media-630287363216` | Menu photos under `menu/`. Fully private: all public access blocked. |
 | CloudFront | `d2n5hm5b49hk3p.cloudfront.net` | CDN in front of the bucket (price class 200, includes India). The only reader of the bucket, via Origin Access Control. |
 | CloudWatch log groups | `/aws/lambda/wmh-*`, `/aws/apigateway/wmh-api` | 14-day retention. Access logs never include headers or bodies. |
@@ -65,6 +68,10 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `POST /addresses` | JWT | `{label, receiver_name, receiver_phone, line1, line2?, landmark?, pincode, latitude, longitude, is_default?}` | `201 Address` |
 | `PATCH /addresses/{id}` | JWT | any of the POST fields (`latitude` + `longitude` together) | `200 Address` |
 | `DELETE /addresses/{id}` | JWT | – | `204` |
+| `POST /orders` | JWT + `Idempotency-Key` header | `{address_id, delivery_date, slot_label, payment_method, items: [{product_id, quantity, spice_level?, note?}]}` | `201 Order` |
+| `GET /orders` | JWT | – | `200 Order[]`: newest first, latest 50 |
+| `GET /orders/{id}` | JWT | – | `200 Order` |
+| `POST /orders/{id}/cancel` | JWT | – | `200 Order` (already cancelled → same answer) |
 
 Menu responses carry `Cache-Control: public, max-age=60`, so menu edits show up within a minute.
 
@@ -82,11 +89,35 @@ Address rules (all enforced by the server):
 - `Address` responses add `distance_km` (from the hotel) and omit empty `line2` / `landmark`.
 - Another user's address id answers `404`, same as one that doesn't exist.
 
+Order rules (all enforced by the server; the app shows the same ones):
+- **Prices come from the menu in the table.** The app sends only product ids and quantities. Each
+  order stores a frozen copy of the dish names/prices (`items`) and of the address (`address_snapshot`).
+- **Bill**: subtotal + ₹30 delivery + 5% GST on the subtotal, rounded half up, integer paise.
+- **Minimum order ₹100 of food** (subtotal, before delivery and GST) → else `422 BELOW_MINIMUM_ORDER`.
+  Change `min_order_paise` in `terraform/variables.tf` (and `MIN_ORDER_PAISE` in the app's `pricing.ts`).
+- **Cash on delivery only** until Part 7: `payment_method: "online"` → `400 PAYMENT_METHOD_UNAVAILABLE`.
+  COD orders start `CONFIRMED`, `payment_status: "pending"`.
+- **Dates in India time** (IST, fixed +05:30): today or tomorrow only; a slot for today closes 30 minutes
+  before it starts → `409 SLOT_UNAVAILABLE`. `slot_label` must be one of the app's five labels exactly.
+- **Items**: 1–20 lines, quantity 1–20, `spice_level` only on dishes with spice levels, `note` ≤ 120 chars.
+  Unknown or sold-out dish → `409 PRODUCT_UNAVAILABLE` (the app reloads the menu).
+- **Address** must be yours (`404`) and still inside the delivery area (`422 OUT_OF_DELIVERY_AREA`).
+- **Order number** `WMH-YYYYMMDD-NNNN` from an atomic per-day counter (IST date of placing). A failed
+  request after the counter step can leave a gap in the numbers; numbers are never reused.
+- **No double orders**: the same `Idempotency-Key` + same body within 24 h returns the first order
+  (`Idempotent-Replayed: true` header); same key + different body → `409 IDEMPOTENCY_CONFLICT`. The order
+  and the key record are written in one DynamoDB transaction, so two simultaneous retries can't both win.
+- **Cancel** only while `PENDING_PAYMENT` or `CONFIRMED` → else `409 ORDER_NOT_CANCELLABLE`.
+- Stored but not returned: `GSI1PK = ORDERDATE#<delivery_date>`, `GSI1SK = <slot hour>#<created_at>#<id>`,
+  ready for the Part 6 kitchen index ("all orders for a day, by slot") without a data migration.
+
 Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PASSWORD`,
 `EMAIL_TAKEN` (409), `USER_NOT_CONFIRMED` (403 → show the code screen), `INVALID_CODE`,
 `CODE_EXPIRED`, `ALREADY_CONFIRMED` (409), `INVALID_CREDENTIALS` (401),
 `INVALID_REFRESH_TOKEN` (401 → log out locally), `TOO_MANY_REQUESTS` (429),
 `OUT_OF_DELIVERY_AREA` (422), `LOCATION_REQUIRED`, `ADDRESS_LIMIT` (409),
+`BELOW_MINIMUM_ORDER` (422), `PAYMENT_METHOD_UNAVAILABLE`, `SLOT_UNAVAILABLE` (409),
+`PRODUCT_UNAVAILABLE` (409), `IDEMPOTENCY_CONFLICT` (409), `ORDER_NOT_CANCELLABLE` (409), `CONFLICT` (409),
 `EMAIL_DELIVERY_FAILED` (502), `EMAIL_CHANGE_NOT_SUPPORTED`, `CHALLENGE_REQUIRED`,
 `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`.
 
@@ -152,7 +183,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-102 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
+161 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
 with mocks, and `verify-auth.ps1` checks them for real.
 
 ## Verify after deploy
@@ -182,7 +213,14 @@ Addresses need a confirmed account; the script deletes everything it creates:
 ```powershell
 .\backend\scripts\verify-addresses.ps1 -Email you+wmh1@gmail.com
 ```
-If PowerShell blocks either script: `Set-ExecutionPolicy -Scope Process Bypass`.
+Orders need a confirmed account. The script places **one real order** (tomorrow, Morning, cash) and
+cancels it, so one cancelled order stays in that account's history:
+
+```powershell
+.\backend\scripts\verify-orders.ps1 -Email you+wmh1@gmail.com
+```
+
+If PowerShell blocks a script: `Set-ExecutionPolicy -Scope Process Bypass`.
 
 Logs, if something fails:
 
@@ -190,6 +228,7 @@ Logs, if something fails:
 aws logs tail /aws/lambda/wmh-auth --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-catalog --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-addresses --since 15m --profile wmh --region ap-south-1
+aws logs tail /aws/lambda/wmh-orders --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/apigateway/wmh-api --since 15m --profile wmh --region ap-south-1
 ```
 
