@@ -31,7 +31,8 @@ data "aws_iam_policy_document" "lambda" {
       "dynamodb:GetItem",
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
-      "dynamodb:Query", # catalog: read the whole menu partition in one call
+      "dynamodb:Query",      # catalog: read the whole menu partition in one call
+      "dynamodb:DeleteItem", # addresses: DELETE /addresses/{id}
     ]
     resources = [aws_dynamodb_table.main.arn]
   }

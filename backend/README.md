@@ -6,6 +6,7 @@ one environment, managed with **Terraform**. Python 3.13 Lambdas on arm64.
 Status:
 - **Part 1, auth**: deployed 2026-11-18.
 - **Part 3, menu + photos**: deployed 2026-11-24. API `https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com`, photos `https://d2n5hm5b49hk3p.cloudfront.net`.
+- **Part 4, saved addresses**: 3 km GPS delivery area around the hotel (19.856833, 75.851944).
 
 ```
 backend/
@@ -14,16 +15,18 @@ backend/
 │   ├── users.py             profile item in DynamoDB
 │   ├── auth.py              /auth/* routes
 │   ├── me.py                /me routes
-│   └── catalog.py           /categories, /products (the menu)
+│   ├── catalog.py           /categories, /products (the menu)
+│   └── addresses.py         /addresses (saved delivery addresses, 3 km check)
 ├── tests/                   pytest + moto (no AWS account touched)
 ├── scripts/
 │   ├── gen_lambda_sources.py   src/*.py  ->  terraform/lambda_src_*.tf
 │   ├── verify-auth.ps1         end-to-end check of auth against the deployed API
-│   └── verify-catalog.ps1      check of the menu API + CloudFront photos
+│   ├── verify-catalog.ps1      check of the menu API + CloudFront photos
+│   └── verify-addresses.ps1    check of the addresses API with a real account
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (55 resources)
+## What gets created (63 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
@@ -33,8 +36,8 @@ backend/
 | DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`) and the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`); addresses and orders later. On-demand billing, point-in-time recovery. |
 | Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
 | IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query items in `wmh-main`. Nothing else. |
-| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog` | The handlers. Routing by `event["routeKey"]`. |
-| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 12 routes, a JWT authorizer on `/me`, throttled to 50 req/s (burst 100). |
+| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`. |
+| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 16 routes, a JWT authorizer on `/me` and `/addresses`, throttled to 50 req/s (burst 100). |
 | S3 bucket | `wmh-media-630287363216` | Menu photos under `menu/`. Fully private: all public access blocked. |
 | CloudFront | `d2n5hm5b49hk3p.cloudfront.net` | CDN in front of the bucket (price class 200, includes India). The only reader of the bucket, via Origin Access Control. |
 | CloudWatch log groups | `/aws/lambda/wmh-*`, `/aws/apigateway/wmh-api` | 14-day retention. Access logs never include headers or bodies. |
@@ -58,16 +61,32 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `PATCH /me` | JWT | `{name?, phone?}` | `200 User` |
 | `GET /categories` | – | – | `200 Category[]`: active only, by `sort_order` |
 | `GET /products` | – | – | `200 Product[]`: sold-out ones included (`is_available: false`) |
+| `GET /addresses` | JWT | – | `200 Address[]`: default first, then oldest first |
+| `POST /addresses` | JWT | `{label, receiver_name, receiver_phone, line1, line2?, landmark?, pincode, latitude, longitude, is_default?}` | `201 Address` |
+| `PATCH /addresses/{id}` | JWT | any of the POST fields (`latitude` + `longitude` together) | `200 Address` |
+| `DELETE /addresses/{id}` | JWT | – | `204` |
 
 Menu responses carry `Cache-Control: public, max-age=60`, so menu edits show up within a minute.
 
 `token` is the Cognito **ID token**. Send it as `Authorization: Bearer <token>`.
 `User` is exactly `src/types/index.ts` → `User`: `{id, name, phone, email, role, is_active}`.
 
+Address rules (all enforced by the server):
+- **Delivery area**: the GPS position must be within **3 km** (straight line) of the hotel,
+  19.856833, 75.851944 (Chandanzira). Otherwise `422 OUT_OF_DELIVERY_AREA`; no position →
+  `400 LOCATION_REQUIRED`. Change the radius or the hotel position in `terraform/variables.tf`.
+- `city` is always `"Jalna"`; pincode must be `431xxx`; at most **5** addresses (`409 ADDRESS_LIMIT`).
+- **Exactly one default**, stored once as `default_address_id` on the user's profile item. The first
+  address becomes default; deleting the default promotes the oldest remaining one; sending
+  `is_default: false` for the current default is ignored (pick another default instead).
+- `Address` responses add `distance_km` (from the hotel) and omit empty `line2` / `landmark`.
+- Another user's address id answers `404`, same as one that doesn't exist.
+
 Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PASSWORD`,
 `EMAIL_TAKEN` (409), `USER_NOT_CONFIRMED` (403 → show the code screen), `INVALID_CODE`,
 `CODE_EXPIRED`, `ALREADY_CONFIRMED` (409), `INVALID_CREDENTIALS` (401),
 `INVALID_REFRESH_TOKEN` (401 → log out locally), `TOO_MANY_REQUESTS` (429),
+`OUT_OF_DELIVERY_AREA` (422), `LOCATION_REQUIRED`, `ADDRESS_LIMIT` (409),
 `EMAIL_DELIVERY_FAILED` (502), `EMAIL_CHANGE_NOT_SUPPORTED`, `CHALLENGE_REQUIRED`,
 `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`.
 
@@ -133,7 +152,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-65 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
+102 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
 with mocks, and `verify-auth.ps1` checks them for real.
 
 ## Verify after deploy
@@ -157,6 +176,12 @@ The menu needs no login:
 
 It checks both menu routes against the contract, that every photo loads from CloudFront as
 `image/jpeg`, and that the bucket refuses direct access.
+
+Addresses need a confirmed account; the script deletes everything it creates:
+
+```powershell
+.\backend\scripts\verify-addresses.ps1 -Email you+wmh1@gmail.com
+```
 If PowerShell blocks either script: `Set-ExecutionPolicy -Scope Process Bypass`.
 
 Logs, if something fails:
@@ -164,6 +189,7 @@ Logs, if something fails:
 ```powershell
 aws logs tail /aws/lambda/wmh-auth --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-catalog --since 15m --profile wmh --region ap-south-1
+aws logs tail /aws/lambda/wmh-addresses --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/apigateway/wmh-api --since 15m --profile wmh --region ap-south-1
 ```
 

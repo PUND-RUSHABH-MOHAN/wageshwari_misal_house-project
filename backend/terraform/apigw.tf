@@ -16,6 +16,10 @@ locals {
     "PATCH /me"                  = { fn = "me", auth = true }
     "GET /categories"            = { fn = "catalog", auth = false }
     "GET /products"              = { fn = "catalog", auth = false }
+    "GET /addresses"             = { fn = "addresses", auth = true }
+    "POST /addresses"            = { fn = "addresses", auth = true }
+    "PATCH /addresses/{id}"      = { fn = "addresses", auth = true }
+    "DELETE /addresses/{id}"     = { fn = "addresses", auth = true }
   }
 }
 

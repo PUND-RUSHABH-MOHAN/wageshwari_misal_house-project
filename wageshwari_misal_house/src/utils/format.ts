@@ -95,5 +95,5 @@ export const PASSWORD_RULE = 'At least 8 characters, with a lowercase letter and
 export const isValidPassword = (v: string) => v.length >= 8 && /[a-z]/.test(v) && /\d/.test(v);
 /** Cognito email codes are 6 digits. */
 export const isValidEmailCode = (v: string) => /^\d{6}$/.test(v.trim());
-/** Pune pincodes are 411xxx / 412xxx / 410xxx. */
-export const isValidPunePincode = (v: string) => /^41[0-2]\d{3}$/.test(v);
+/** Jalna-area pincodes start with 431 (e.g. 431203). The 3 km GPS check is the real limit. */
+export const isValidJalnaPincode = (v: string) => /^431\d{3}$/.test(v);

@@ -5,7 +5,7 @@ variable "project" {
 }
 
 variable "region" {
-  description = "AWS region. Mumbai, closest to Pune."
+  description = "AWS region (Mumbai, the closest region to Jalna)."
   type        = string
   default     = "ap-south-1"
 }
@@ -26,4 +26,30 @@ variable "api_throttle_burst" {
   description = "Short burst of requests allowed above the steady rate."
   type        = number
   default     = 100
+}
+
+# The hotel: A/P Chandanzira, Jalna – Chh. Sambhajinagar Highway, Jalna 431203.
+# 19°51'24.6"N 75°51'07.0"E, given by the owner on 2026-11-25.
+variable "shop_latitude" {
+  description = "Hotel latitude (decimal degrees). Centre of the delivery area."
+  type        = number
+  default     = 19.856833
+}
+
+variable "shop_longitude" {
+  description = "Hotel longitude (decimal degrees)."
+  type        = number
+  default     = 75.851944
+}
+
+variable "delivery_radius_km" {
+  description = "Addresses further than this (straight line) from the hotel are refused."
+  type        = number
+  default     = 3
+}
+
+variable "shop_city" {
+  description = "City stored on every delivery address."
+  type        = string
+  default     = "Jalna"
 }

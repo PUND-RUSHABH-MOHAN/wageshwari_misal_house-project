@@ -7,7 +7,7 @@
  *
  * Authenticated calls take an ID token; `src/services/session.ts` supplies a fresh one.
  */
-import type { Category, Product, User } from '@/types';
+import type { Address, AddressInput, Category, Product, User } from '@/types';
 
 const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const TIMEOUT_MS = 15000;
@@ -156,6 +156,18 @@ export const authApi = {
 export const catalogApi = {
   categories: () => request<Category[]>('GET', '/categories'),
   products: () => request<Product[]>('GET', '/products'),
+};
+
+/** Body for POST / PATCH /addresses: the form fields, without the client-only `id`. */
+export type AddressPayload = Omit<AddressInput, 'id'>;
+
+export const addressApi = {
+  list: (token: string) => request<Address[]>('GET', '/addresses', { token }),
+  create: (token: string, body: AddressPayload) => request<Address>('POST', '/addresses', { token, body }),
+  update: (token: string, id: string, body: Partial<AddressPayload>) =>
+    request<Address>('PATCH', `/addresses/${encodeURIComponent(id)}`, { token, body }),
+  remove: (token: string, id: string) =>
+    request<void>('DELETE', `/addresses/${encodeURIComponent(id)}`, { token }),
 };
 
 export const meApi = {
