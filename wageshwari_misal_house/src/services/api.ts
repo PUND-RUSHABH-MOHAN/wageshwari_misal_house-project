@@ -7,7 +7,7 @@
  *
  * Authenticated calls take an ID token; `src/services/session.ts` supplies a fresh one.
  */
-import type { Address, AddressInput, Category, Product, User } from '@/types';
+import type { Address, AddressInput, Category, Order, PlaceOrderInput, Product, SpiceLevel, User } from '@/types';
 
 const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const TIMEOUT_MS = 15000;
@@ -34,7 +34,11 @@ export function errorMessage(e: unknown): string {
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
-async function request<T>(method: Method, path: string, opts: { body?: unknown; token?: string } = {}): Promise<T> {
+async function request<T>(
+  method: Method,
+  path: string,
+  opts: { body?: unknown; token?: string; headers?: Record<string, string> } = {},
+): Promise<T> {
   if (!BASE_URL) {
     throw new ApiError(
       0,
@@ -43,7 +47,7 @@ async function request<T>(method: Method, path: string, opts: { body?: unknown; 
     );
   }
 
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: 'application/json', ...opts.headers };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
 
@@ -173,4 +177,28 @@ export const addressApi = {
 export const meApi = {
   get: (token: string) => request<User>('GET', '/me', { token }),
   patch: (token: string, patch: MePatch) => request<User>('PATCH', '/me', { token, body: patch }),
+};
+
+/** One cart line as POST /orders wants it. The server looks up names and prices itself. */
+export interface OrderLineInput {
+  product_id: string;
+  quantity: number;
+  spice_level?: SpiceLevel;
+  note?: string;
+}
+
+export type PlaceOrderBody = PlaceOrderInput & { items: OrderLineInput[] };
+
+export const orderApi = {
+  /** Newest first (latest 50). */
+  list: (token: string) => request<Order[]>('GET', '/orders', { token }),
+  get: (token: string, id: string) => request<Order>('GET', `/orders/${encodeURIComponent(id)}`, { token }),
+  /**
+   * `idempotencyKey`: send the same key when retrying the same checkout, so a request that
+   * reached the server before the network dropped doesn't create a second order.
+   */
+  create: (token: string, body: PlaceOrderBody, idempotencyKey: string) =>
+    request<Order>('POST', '/orders', { token, body, headers: { 'Idempotency-Key': idempotencyKey } }),
+  cancel: (token: string, id: string) =>
+    request<Order>('POST', `/orders/${encodeURIComponent(id)}/cancel`, { token }),
 };

@@ -21,22 +21,24 @@ import {
 import { HOME_HREF } from '@/constants/routes';
 import { Colors, Fonts, Radius, Shadow, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
+import { errorMessage } from '@/services/api';
 import type { CartItem, PaymentMethod } from '@/types';
+import { formatAddress, formatCurrency, formatDeliveryDate, SPICE_LABELS } from '@/utils/format';
 import {
-  addDays,
-  formatAddress,
-  formatCurrency,
-  formatDeliveryDate,
-  SPICE_LABELS,
-  toISODate,
-} from '@/utils/format';
-import { DELIVERY_SLOTS, isSlotAvailable, slotLabel } from '@/utils/pricing';
+  DELIVERY_SLOTS,
+  isSlotAvailable,
+  istDate,
+  MIN_ORDER_PAISE,
+  shortOfMinimum,
+  slotLabel,
+} from '@/utils/pricing';
 
 type DayKey = 'today' | 'tomorrow';
 
-const PAYMENT_OPTIONS: { method: PaymentMethod; title: string; hint: string; icon: IconName }[] = [
-  { method: 'cod', title: 'Cash on Delivery', hint: 'Pay cash or UPI to the rider', icon: 'cash' },
-  { method: 'online', title: 'UPI / Online', hint: 'GPay, PhonePe, Paytm, cards', icon: 'upi' },
+/** `available: false` shows the option greyed out. Online payment arrives in part 7. */
+const PAYMENT_OPTIONS: { method: PaymentMethod; title: string; hint: string; icon: IconName; available: boolean }[] = [
+  { method: 'cod', title: 'Cash on Delivery', hint: 'Pay cash or UPI to the rider', icon: 'cash', available: true },
+  { method: 'online', title: 'UPI / Online', hint: 'Coming soon', icon: 'upi', available: false },
 ];
 
 export default function CartScreen() {
@@ -48,7 +50,7 @@ export default function CartScreen() {
 
   const [day, setDay] = useState<DayKey>(todayHasSlots ? 'today' : 'tomorrow');
   const [slotId, setSlotId] = useState<string | null>(null);
-  const [payment, setPayment] = useState<PaymentMethod>('cod');
+  const payment: PaymentMethod = 'cod'; // the only option until online payment is ready
   const [addressOpen, setAddressOpen] = useState(false);
   const [editing, setEditing] = useState<CartItem | null>(null);
   const [placing, setPlacing] = useState(false);
@@ -56,7 +58,10 @@ export default function CartScreen() {
 
   const isToday = day === 'today';
   const effectiveDay: DayKey = isToday && !todayHasSlots ? 'tomorrow' : day;
-  const deliveryDate = toISODate(effectiveDay === 'today' ? now : addDays(now, 1));
+  // Dates and slot times follow India time (IST), like the server.
+  const todayIso = istDate(now);
+  const tomorrowIso = istDate(now, 1);
+  const deliveryDate = effectiveDay === 'today' ? todayIso : tomorrowIso;
   const availableSlots = DELIVERY_SLOTS.filter((s) => isSlotAvailable(s, effectiveDay === 'today', now));
   // Keep the user's choice if still valid, otherwise fall back to the first open slot.
   const selectedSlot = availableSlots.find((s) => s.id === slotId) ?? availableSlots[0] ?? null;
@@ -75,7 +80,11 @@ export default function CartScreen() {
     );
   }
 
-  const handlePlaceOrder = () => {
+  const shortBy = shortOfMinimum(bill);
+  const soldOut = cart.filter((c) => !c.product.is_available);
+
+  const handlePlaceOrder = async () => {
+    if (placing) return;
     if (!selectedAddress) {
       setError('Please add a delivery address.');
       setAddressOpen(true);
@@ -85,24 +94,30 @@ export default function CartScreen() {
       setError('Please choose a delivery slot.');
       return;
     }
+    if (soldOut.length > 0) {
+      setError(`${soldOut[0].product.name} is sold out right now. Please remove it to continue.`);
+      return;
+    }
+    if (shortBy > 0) {
+      setError(`Add ${formatCurrency(shortBy)} more. Minimum order is ${formatCurrency(MIN_ORDER_PAISE)} of food.`);
+      return;
+    }
     setError(null);
     setPlacing(true);
-    // Simulated network latency for POST /orders
-    setTimeout(() => {
-      try {
-        placeOrder({
-          address_id: selectedAddress.id,
-          delivery_date: deliveryDate,
-          slot_label: slotLabel(selectedSlot),
-          payment_method: payment,
-        });
-        router.navigate('/orders');
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Could not place order. Please try again.');
-      } finally {
-        setPlacing(false);
-      }
-    }, 600);
+    try {
+      await placeOrder({
+        address_id: selectedAddress.id,
+        delivery_date: deliveryDate,
+        slot_label: slotLabel(selectedSlot),
+        payment_method: payment,
+      });
+      router.navigate('/orders');
+    } catch (e) {
+      // The server re-checks prices, slot, address and stock; show what it said.
+      setError(errorMessage(e));
+    } finally {
+      setPlacing(false);
+    }
   };
 
   return (
@@ -131,6 +146,9 @@ export default function CartScreen() {
                 </View>
                 <Text style={styles.unitPrice}>{formatCurrency(item.product.price)} each</Text>
                 <View style={styles.itemTags}>
+                  {!item.product.is_available ? (
+                    <Tag label="Sold out" color={Colors.danger} bg={Colors.dangerSoft} />
+                  ) : null}
                   {item.spice_level ? (
                     <Tag label={SPICE_LABELS[item.spice_level]} icon="flame" color={Colors.spice} bg={Colors.spiceSoft} />
                   ) : null}
@@ -188,7 +206,7 @@ export default function CartScreen() {
           <View style={styles.dayRow}>
             <Pill
               label="Today"
-              sublabel={todayHasSlots ? formatDeliveryDate(toISODate(now)).slice(0, -5) : 'Slots closed'}
+              sublabel={todayHasSlots ? formatDeliveryDate(todayIso).slice(0, -5) : 'Slots closed'}
               selected={effectiveDay === 'today'}
               disabled={!todayHasSlots}
               onPress={() => setDay('today')}
@@ -196,7 +214,7 @@ export default function CartScreen() {
             />
             <Pill
               label="Tomorrow"
-              sublabel={formatDeliveryDate(toISODate(addDays(now, 1))).slice(0, -5)}
+              sublabel={formatDeliveryDate(tomorrowIso).slice(0, -5)}
               selected={effectiveDay === 'tomorrow'}
               onPress={() => setDay('tomorrow')}
               style={styles.flex}
@@ -230,9 +248,13 @@ export default function CartScreen() {
                 <Pressable
                   key={opt.method}
                   accessibilityRole="radio"
-                  accessibilityState={{ selected }}
-                  onPress={() => setPayment(opt.method)}
-                  style={[styles.payOption, selected && styles.payOptionSelected]}>
+                  accessibilityState={{ selected, disabled: !opt.available }}
+                  disabled={!opt.available}
+                  style={[
+                    styles.payOption,
+                    selected && styles.payOptionSelected,
+                    !opt.available && styles.payOptionDisabled,
+                  ]}>
                   <View style={styles.payHead}>
                     <Icon name={opt.icon} size={22} color={selected ? Colors.primary : Colors.textMuted} />
                     <Icon
@@ -257,6 +279,12 @@ export default function CartScreen() {
           <BillRow label="GST (5% on items)" value={formatCurrency(bill.tax)} />
           <View style={styles.dashed} />
           <BillRow label="Grand total" value={formatCurrency(bill.total)} strong />
+          {shortBy > 0 ? (
+            <Text style={styles.minimum}>
+              Minimum order is {formatCurrency(MIN_ORDER_PAISE)} of food (delivery and GST not included). Add{' '}
+              {formatCurrency(shortBy)} more.
+            </Text>
+          ) : null}
         </Card>
 
         <Text style={styles.policy}>
@@ -271,14 +299,14 @@ export default function CartScreen() {
           <View>
             <Text style={styles.footerTotal}>{formatCurrency(bill.total)}</Text>
             <Text style={styles.footerHint}>
-              {payment === 'cod' ? 'Pay on delivery' : 'Pay via UPI'}
+              {shortBy > 0 ? `Add ${formatCurrency(shortBy)} more` : 'Pay on delivery'}
             </Text>
           </View>
           <Button
             title="Place Order"
             onPress={handlePlaceOrder}
             loading={placing}
-            disabled={!selectedSlot}
+            disabled={!selectedSlot || shortBy > 0 || soldOut.length > 0}
             style={styles.placeBtn}
           />
         </View>
@@ -365,12 +393,14 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   payOptionSelected: { borderColor: Colors.primary, backgroundColor: Colors.primarySoft },
+  payOptionDisabled: { opacity: 0.5 },
   payHead: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
   payTitle: { fontSize: 14, fontWeight: '800', color: Colors.text },
   payHint: { fontSize: 11, color: Colors.textMuted },
 
   billCard: { gap: Spacing.sm },
   dashed: { borderTopWidth: 1, borderStyle: 'dashed', borderColor: Colors.border, marginVertical: Spacing.xs },
+  minimum: { fontSize: 12, color: Colors.warning, fontWeight: '600', marginTop: Spacing.xs },
   policy: { fontSize: 12, color: Colors.textSubtle, textAlign: 'center', paddingHorizontal: Spacing.lg },
 
   footer: {

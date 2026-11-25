@@ -105,11 +105,14 @@ export function OrderCard({
   expanded,
   onToggle,
   onCancel,
+  cancelling = false,
 }: {
   order: Order;
   expanded: boolean;
   onToggle: () => void;
   onCancel: () => void;
+  /** Spinner on the cancel button while POST /orders/:id/cancel runs. */
+  cancelling?: boolean;
 }) {
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
   const summary = order.items.map((i) => `${i.quantity} × ${i.product_name}`).join(', ');
@@ -208,7 +211,13 @@ export function OrderCard({
           </View>
 
           {isCancellable(order) ? (
-            <Button title="Cancel order" variant="danger" onPress={onCancel} style={styles.cancelBtn} />
+            <Button
+              title="Cancel order"
+              variant="danger"
+              onPress={onCancel}
+              loading={cancelling}
+              style={styles.cancelBtn}
+            />
           ) : null}
         </View>
       ) : null}

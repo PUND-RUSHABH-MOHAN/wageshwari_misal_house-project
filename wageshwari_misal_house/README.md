@@ -3,12 +3,12 @@
 A food-ordering app for **Wagheshwar Misal House**, A/P Chandanzira, Jalna – Chh. Sambhajinagar
 Highway, Jalna 431203 (address in `src/constants/shop.ts`). Customers browse the menu
 (Misal, Thali, Vada Pav, Chaha), pick a spice level, choose a delivery slot and
-place orders (Cash on Delivery / Online).
+place orders (Cash on Delivery; online payment comes later).
 
-> **Current status:** the UI and app flow are complete. The app runs on
-> **built-in mock data**. There is **no backend connection yet**: no base URL and
-> no HTTP calls. The "API integration" section below explains exactly where the
-> backend plugs in, and the JSON format each screen expects.
+> **Current status:** connected to the AWS backend (`../backend/`). Sign-up / login, the menu,
+> saved addresses and orders all use the live API. Still to come: the kitchen/admin screen,
+> online payment, phone OTP login. Section 4 explains where the backend plugs in, and
+> section 5 the JSON each screen expects.
 
 ---
 
@@ -53,7 +53,7 @@ src/
 │       └── profile.tsx       # Profile + saved addresses
 ├── components/               # Reusable UI (ProductCard, ProductDetailSheet, BottomSheet, …)
 ├── context/AppContext.tsx    # ★ Global state + every action that will become an API call
-├── data/mock-data.ts         # ★ Mock data (same shape as API responses) + bundled images
+├── data/mock-data.ts         # Bundled images: logo, login background, fallback food photos
 ├── types/index.ts            # ★ Data models = the JSON contract with the backend
 ├── utils/pricing.ts          # Bill calculation, delivery fee, GST, delivery slots, kitchen hours
 ├── utils/format.ts           # Currency (paise → ₹), dates, spice labels, validators
@@ -73,8 +73,8 @@ npx tsc --noEmit        # type-check
 npx expo lint           # lint
 ```
 
-> Login is mocked. Any valid email + password (6+ characters), or any 10-digit
-> mobile number + any 4-digit OTP, logs in as the demo user.
+> Login uses the real backend: sign up with a real email (a 6-digit code is emailed), then log in.
+> Password: 8+ characters with a lowercase letter and a number.
 
 ---
 
@@ -88,7 +88,7 @@ npx expo lint           # lint
 | `eas.json` | The same variable for EAS cloud builds (`preview`, `production`). |
 | `src/services/api.ts` | The only place that calls `fetch`. One function per endpoint; every failure becomes an `ApiError` with the backend's `code` and `message`. |
 | `src/services/session.ts` | Tokens. The refresh token (30 days) is kept in the OS keystore with `expo-secure-store`; the ID token (1 hour) only in memory, renewed automatically. |
-| `src/context/AppContext.tsx` | Screens call `useApp()`. Auth, profile and the menu call the API; the rest is still mock data. |
+| `src/context/AppContext.tsx` | Screens call `useApp()`. Everything server-side calls the API; only the cart lives on the phone. |
 
 **Live (Part 2):** sign-up, email-code confirmation, login, remembered login across restarts,
 silent token refresh, forgot/reset password, `GET`/`PATCH /me`, logout (revokes the refresh token).
@@ -104,8 +104,15 @@ Adding an address needs the phone's GPS position ("Use my current location", `ex
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
 
-**Still mock data until its backend part lands:** orders (part 5). They live in memory and
-reset when the app restarts.
+**Live (Part 5):** orders. The Orders tab loads `GET /orders` after login (pull down to refresh) and
+re-checks every 20 seconds while an order is in progress and the app is open. **Place Order** sends
+the cart to `POST /orders` with an `Idempotency-Key` header: if the network drops and you tap again
+with the same cart, the server returns the first order instead of making a second one. The server
+re-checks everything (prices from the menu, slot, address, stock) and its message is shown above the
+button if it refuses; if a dish has sold out, the menu reloads and the cart marks it **Sold out**.
+Cancel asks for confirmation and calls `POST /orders/:id/cancel`. Cash on delivery only for now
+("UPI / Online" shows as coming soon). Minimum order ₹100 of food: below that the cart says how much
+to add and the button stays disabled.
 Phone + OTP login is removed from the login screen until part 8.
 
 ### 4.2 Running against the backend
@@ -117,7 +124,48 @@ npx expo start --clear     # scan the QR with Expo Go, or press "a" for the Andr
 
 Change the API URL in `.env` (and `eas.json` for cloud builds), then restart with `--clear`.
 
-### 4.3 Endpoint map (planned endpoints, as named in the code comments)
+### 4.3 Google Maps (address pin + hotel map)
+
+- **Address form → Pin on map**: a full-screen map with the 3 km delivery circle around the hotel.
+  The pin stays in the middle and the customer moves the map under it; *Confirm* only works inside
+  the circle. *Use my current location* still works as before.
+- **Account → Visit us**: a small map of the hotel and the delivery area, plus **Directions**
+  (a plain Google Maps link: no API key, opens the Google Maps app).
+
+Code: `src/components/maps/*.native.tsx` (phones) with empty `*.tsx` twins for web, where
+`react-native-maps` (1.29.11, the SDK 58 version) doesn't exist; `src/utils/maps.ts`; `app.config.ts`.
+
+**The Android key is not in Git.** `app.config.ts` reads `GOOGLE_MAPS_ANDROID_API_KEY` and writes it
+into `AndroidManifest.xml` only; it is not copied into the public app config. Without a key the
+app still works and the map buttons are hidden in standalone Android builds. Cost: Google lists
+the mobile Maps SDK with unlimited free usage; Google still requires a billing account.
+
+One-time setup in Google Cloud (console.cloud.google.com):
+
+1. Create a project, attach a billing account.
+2. *APIs & Services → Library* → enable **Maps SDK for Android**.
+3. *APIs & Services → Credentials → Create credentials → API key*. Edit the key:
+   - *Application restrictions* → **Android apps** → add package `com.wagheshwar.misalhouse` with the
+     **SHA-1** of the app's signing certificate. Get it with
+     `npx eas-cli@latest credentials -p android` (pick the build profile, read "SHA1 Fingerprint").
+     When the app goes to the Play Store (part 10), also add Google Play's app-signing SHA-1.
+   - *API restrictions* → **Restrict key** → only **Maps SDK for Android**.
+4. Put the key where builds can read it (never in Git, never in chat):
+
+   ```powershell
+   # local builds (file is git-ignored via .env*.local)
+   Set-Content -Path .env.local -Value "GOOGLE_MAPS_ANDROID_API_KEY=<your key>"
+   # EAS cloud builds (preview + production profiles read these environments)
+   npx eas-cli@latest env:create --name GOOGLE_MAPS_ANDROID_API_KEY --value "<your key>" --environment preview --environment production --visibility sensitive
+   ```
+
+**Testing maps:** the key is locked to this app, so it can't work inside Expo Go (a different
+app). Expo Go may still show a map using its own setup, or a blank grey map. Test maps in a
+preview build: `npx eas-cli@latest build -p android --profile preview`, then install the APK.
+A blank grey map in that build means the key is missing, restricted to the wrong package/SHA-1,
+or *Maps SDK for Android* isn't enabled.
+
+### 4.4 Endpoint map (planned endpoints, as named in the code comments)
 
 | Screen | Action in code | Endpoint | Code location |
 |---|---|---|---|
@@ -125,16 +173,16 @@ Change the API URL in `.env` (and `eas.json` for cloud builds), then restart wit
 | Login | `login()` | `POST /auth/login` (email) · `POST /auth/otp/verify` (phone) | `AppContext.tsx` → `LOGIN` |
 | Profile | `logout()` | `POST /auth/logout` | `AppContext.tsx` → `LOGOUT` |
 | Home | initial data | `GET /categories`, `GET /products` | **live** (`AppContext` → `loadCatalog`) |
-| Profile | current user | `GET /me` | `mock-data.ts` → `MOCK_USER` |
+| Profile | current user | `GET /me` | **live** (restored at startup) |
 | Profile | `updateUser()` | `PATCH /me` | `AppContext.tsx` → `UPDATE_USER` |
 | Profile / Cart | addresses list | `GET /addresses` | **live** (`AppContext` → `loadAddresses`) |
 | Profile / Cart | `saveAddress()` | `POST /addresses` (new) · `PATCH /addresses/:id` (edit) | **live** |
 | Profile | `deleteAddress()` | `DELETE /addresses/:id` | **live** |
 | Profile | `setDefaultAddress()` | `PATCH /addresses/:id` `{ "is_default": true }` | **live** |
-| Cart | `placeOrder()` | `POST /orders` | `AppContext.tsx` → `PLACE_ORDER` |
-| Orders | order history | `GET /orders` | `mock-data.ts` → `buildSeedOrders()` |
-| Orders | live status | `GET /orders/:id` (polling) or a websocket | `AppContext.tsx` → `ADVANCE_LIVE_ORDERS` |
-| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | `AppContext.tsx` → `CANCEL_ORDER` |
+| Cart | `placeOrder()` | `POST /orders` (+ `Idempotency-Key` header) | **live** |
+| Orders | order history | `GET /orders` | **live** (`AppContext` → `loadOrders`) |
+| Orders | live status | `GET /orders` every 20 s while an order is in progress | **live** (polling) |
+| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | **live** |
 
 The cart is **client-side only** in v1. No cart endpoint is needed.
 
@@ -266,11 +314,14 @@ cart lives on the device:
 }
 ```
 
-- `payment_method`: `"cod"` | `"online"`
+- Header `Idempotency-Key`: a random string (8–64 of `A-Z a-z 0-9 _ -`), the same for retries of one checkout.
+- `payment_method`: `"cod"` | `"online"` (online is refused until part 7)
 - `spice_level`: `"mild"` | `"medium"` | `"teekha"`. Only for products with `has_spice_level: true`.
 - `note`: optional, max 120 characters
+- `delivery_date`: today or tomorrow in India time; `slot_label` exactly as `slotLabel()` builds it.
+- Prices are **not** sent; the server takes them from the menu. Food subtotal must be at least ₹100.
 
-Response: the created **Order** (see 5.5).
+Response: the created **Order** (see 5.5). Full rules and error codes: `backend/README.md`.
 
 ### 5.5 Orders screen
 
@@ -382,6 +433,10 @@ and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and 
 | Delivery slots | Early Bird 7–8, Morning 8–9, Breakfast 9–10, Brunch 10–11, Lunch 12–1 | `src/utils/pricing.ts` |
 | Same-day slot cut-off | A slot closes 30 minutes before it starts | `src/utils/pricing.ts` |
 | Delivery fee / GST | ₹30 flat / 5% | `src/utils/pricing.ts` |
+| Minimum order | ₹100 of food (before delivery and GST) | `src/utils/pricing.ts`, enforced by `backend/src/orders.py` |
+| Time zone | Slots, "today" and kitchen hours use India time (IST) even if the phone is set to another zone | `src/utils/pricing.ts` |
+| Payment | Cash on delivery only until online payment (part 7) | `src/app/(tabs)/cart.tsx`, enforced by the server |
+| Cancelling | Only while `CONFIRMED` (before the kitchen starts) | `AppContext.tsx` → `isCancellable`, enforced by the server |
 | Max quantity per add | 20 | `ProductCard.tsx`, `ProductDetailSheet.tsx` |
 | Cooking note | max 120 characters | `SpiceLevelSheet.tsx` |
 | Service area | Within 3 km (straight line) of the hotel, Chandanzira, Jalna | `src/constants/shop.ts`, enforced by `backend/src/addresses.py` |

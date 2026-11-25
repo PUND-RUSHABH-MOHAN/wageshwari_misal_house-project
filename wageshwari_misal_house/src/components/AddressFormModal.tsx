@@ -5,6 +5,7 @@ import { Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native
 import { FormNotice } from '@/components/AuthLayout';
 import { BottomSheet } from '@/components/BottomSheet';
 import { Icon } from '@/components/Icon';
+import { LocationPickerModal } from '@/components/maps/LocationPickerModal';
 import { Button, Pill, TextField, TextLink } from '@/components/ui';
 import { SHOP } from '@/constants/shop';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
@@ -12,12 +13,12 @@ import { errorMessage } from '@/services/api';
 import type { Address, AddressInput, AddressLabel } from '@/types';
 import { isValidIndianMobile, isValidJalnaPincode } from '@/utils/format';
 import { distanceFromShopKm, formatKm } from '@/utils/geo';
+import { mapsAvailable, type Coords } from '@/utils/maps';
 
 const LABELS: AddressLabel[] = ['Home', 'Work', 'Other'];
 const GPS_TIMEOUT_MS = 20000;
 
 type Errors = Partial<Record<'receiver_name' | 'receiver_phone' | 'line1' | 'pincode' | 'location', string>>;
-type Coords = { latitude: number; longitude: number };
 type LocationState =
   | { kind: 'none' }
   | { kind: 'finding' }
@@ -29,8 +30,9 @@ type LocationState =
  * Add / edit address sheet. Parent should pass `key={initial?.id ?? 'new'}`
  * so form state re-initialises when switching between addresses.
  *
- * The phone's GPS position is required: the server refuses addresses more than
- * SHOP.deliveryRadiusKm from the hotel. The distance shown here is a preview.
+ * A map position is required: the server refuses addresses more than SHOP.deliveryRadiusKm
+ * from the hotel. The customer pins it on a map (Google Maps) or uses the phone's GPS.
+ * The distance shown here is a preview.
  */
 export function AddressFormModal({
   visible,
@@ -69,8 +71,27 @@ export function AddressFormModal({
   const [errors, setErrors] = useState<Errors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [mapOpen, setMapOpen] = useState(false);
+  const canUseMap = mapsAvailable();
 
   const outOfRange = location.kind === 'found' && location.km > SHOP.deliveryRadiusKm;
+
+  /** Store a position (from GPS or the map pin) and fill empty pincode / area fields from it. */
+  const applyCoords = async (coords: Coords) => {
+    setErrors((e) => ({ ...e, location: undefined }));
+    setLocation({ kind: 'found', coords, km: distanceFromShopKm(coords.latitude, coords.longitude), fresh: true });
+    // Best effort: uses the phone's own address lookup; the customer can edit the fields.
+    try {
+      const [place] = await Location.reverseGeocodeAsync(coords);
+      if (place?.postalCode && isValidJalnaPincode(place.postalCode)) {
+        setPincode((p) => p || place.postalCode || '');
+      }
+      const area = [place?.street, place?.district].filter(Boolean).join(', ');
+      if (area) setLine2((l) => l || area);
+    } catch {
+      // No address lookup available (offline, emulator); nothing to fill.
+    }
+  };
 
   const useCurrentLocation = async () => {
     setErrors((e) => ({ ...e, location: undefined }));
@@ -89,20 +110,7 @@ export function AddressFormModal({
         Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), GPS_TIMEOUT_MS)),
       ]);
-      const coords = { latitude: position.coords.latitude, longitude: position.coords.longitude };
-      setLocation({ kind: 'found', coords, km: distanceFromShopKm(coords.latitude, coords.longitude), fresh: true });
-
-      // Fill empty fields from the map's idea of this place. Best effort: the customer can edit them.
-      try {
-        const [place] = await Location.reverseGeocodeAsync(coords);
-        if (place?.postalCode && isValidJalnaPincode(place.postalCode)) {
-          setPincode((p) => p || place.postalCode || '');
-        }
-        const area = [place?.street, place?.district].filter(Boolean).join(', ');
-        if (area) setLine2((l) => l || area);
-      } catch {
-        // No address lookup available (offline, emulator); nothing to fill.
-      }
+      await applyCoords({ latitude: position.coords.latitude, longitude: position.coords.longitude });
     } catch {
       setLocation({
         kind: 'error',
@@ -117,7 +125,11 @@ export function AddressFormModal({
     if (!isValidIndianMobile(receiverPhone)) next.receiver_phone = 'Enter a valid 10-digit mobile number';
     if (line1.trim().length < 5) next.line1 = 'Enter flat / house no. and building';
     if (!isValidJalnaPincode(pincode)) next.pincode = 'Enter a Jalna-area pincode (431xxx)';
-    if (location.kind !== 'found') next.location = 'Use your current location to confirm this address';
+    if (location.kind !== 'found') {
+      next.location = canUseMap
+        ? 'Pin this address on the map (or use your current location)'
+        : 'Use your current location to confirm this address';
+    }
     setErrors(next);
     setFormError(null);
     if (Object.keys(next).length > 0 || location.kind !== 'found' || outOfRange || saving) return;
@@ -189,19 +201,28 @@ export function AddressFormModal({
           <Text style={[styles.locationText, { color: Colors.danger }]}>{location.message}</Text>
         ) : (
           <Text style={styles.locationHint}>
-            Stand at this address and tap below. We use it to check the {SHOP.deliveryRadiusKm} km delivery
-            area and to guide our rider.
+            {canUseMap
+              ? `Put the pin on your door. We use it to check the ${SHOP.deliveryRadiusKm} km delivery area and to guide our rider.`
+              : `Stand at this address and tap below. We use it to check the ${SHOP.deliveryRadiusKm} km delivery area and to guide our rider.`}
           </Text>
         )}
+        {canUseMap ? (
+          <Button
+            title={location.kind === 'found' ? 'Move the pin on the map' : 'Pin on map'}
+            icon="map"
+            onPress={() => setMapOpen(true)}
+            disabled={location.kind === 'finding'}
+          />
+        ) : null}
         <Button
           title={
             location.kind === 'finding'
               ? 'Finding your location…'
               : location.kind === 'found'
-                ? 'Update to my current location'
+                ? 'Use my current location instead'
                 : 'Use my current location'
           }
-          icon="location"
+          icon="myLocation"
           variant="outline"
           onPress={useCurrentLocation}
           loading={location.kind === 'finding'}
@@ -278,6 +299,18 @@ export function AddressFormModal({
           thumbColor={Colors.white}
         />
       </Pressable>
+
+      {canUseMap ? (
+        <LocationPickerModal
+          visible={visible && mapOpen}
+          initial={location.kind === 'found' ? location.coords : null}
+          onClose={() => setMapOpen(false)}
+          onConfirm={(coords) => {
+            setMapOpen(false);
+            applyCoords(coords);
+          }}
+        />
+      ) : null}
     </BottomSheet>
   );
 }

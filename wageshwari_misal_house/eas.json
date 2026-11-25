@@ -10,7 +10,8 @@
       },
       "env": {
         "EXPO_PUBLIC_API_BASE_URL": "https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com"
-      }
+      },
+      "environment": "preview"
     },
     "production": {
       "android": {
@@ -18,7 +19,8 @@
       },
       "env": {
         "EXPO_PUBLIC_API_BASE_URL": "https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com"
-      }
+      },
+      "environment": "production"
     }
   }
 }

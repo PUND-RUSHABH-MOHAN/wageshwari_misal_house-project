@@ -53,3 +53,9 @@ variable "shop_city" {
   type        = string
   default     = "Jalna"
 }
+
+variable "min_order_paise" {
+  description = "Smallest food subtotal (before delivery and GST) an order may have, in paise."
+  type        = number
+  default     = 10000 # ₹100
+}
