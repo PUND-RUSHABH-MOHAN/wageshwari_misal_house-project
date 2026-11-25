@@ -1,3 +1,4 @@
+import { router } from 'expo-router';
 import { useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,6 +19,7 @@ import { mapsAvailable, openShopDirections } from '@/utils/maps';
 export default function ProfileScreen() {
   const {
     currentUser,
+    isAdmin,
     addresses,
     addressesStatus,
     addressesError,
@@ -160,6 +162,19 @@ export default function ProfileScreen() {
             <Text style={styles.phoneHint}>Used for delivery updates from our rider.</Text>
           </View>
         </Card>
+
+        {/* Kitchen tools: admins only (Cognito group `admin`) */}
+        {isAdmin ? (
+          <View>
+            <SectionTitle title="Kitchen tools" />
+            <Card style={styles.adminCard}>
+              <Text style={styles.shopLine}>
+                You&apos;re signed in as kitchen staff. The Kitchen tab shows today&apos;s orders.
+              </Text>
+              <Button title="Manage menu" icon="edit" variant="outline" onPress={() => router.push('/admin-menu')} />
+            </Card>
+          </View>
+        ) : null}
 
         {/* Addresses */}
         <View>
@@ -330,6 +345,7 @@ const styles = StyleSheet.create({
   addressActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: Spacing.xl, marginTop: Spacing.xs },
   deleteText: { color: Colors.danger, fontWeight: '700', fontSize: 14 },
 
+  adminCard: { gap: Spacing.md },
   signOut: { marginTop: Spacing.sm },
   version: { textAlign: 'center', fontSize: 12, color: Colors.textSubtle },
   shopCard: { flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start' },

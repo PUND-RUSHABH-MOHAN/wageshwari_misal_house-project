@@ -73,6 +73,16 @@ def test_products_contract_shape_and_ints(menu):
     assert isinstance(p["price"], int) and not isinstance(p["price"], bool)
 
 
+def test_hidden_products_are_left_out(menu):
+    menu.update_item(
+        Key={"PK": "CATALOG", "SK": "PRODUCT#prd_misal_thali"},
+        UpdateExpression="SET is_active = :f", ExpressionAttributeValues={":f": False},
+    )
+    _, body = call(catalog, "GET /products")
+    assert "prd_misal_thali" not in {p["id"] for p in body}
+    assert len(body) == 2
+
+
 def test_sold_out_products_are_included(menu):
     _, body = call(catalog, "GET /products")
     sold_out = next(x for x in body if x["id"] == "prd_kolhapuri_misal")

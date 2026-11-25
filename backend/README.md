@@ -8,6 +8,7 @@ Status:
 - **Part 3, menu + photos**: deployed 2026-11-24. API `https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com`, photos `https://d2n5hm5b49hk3p.cloudfront.net`.
 - **Part 4, saved addresses**: 3 km GPS delivery area around the hotel (19.856833, 75.851944).
 - **Part 5, orders**: deployed 2026-11-25. Place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
+- **Part 6, kitchen + menu admin**: deployed 2026-11-25. Order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
 
 ```
 backend/
@@ -18,29 +19,31 @@ backend/
 │   ├── me.py                /me routes
 │   ├── catalog.py           /categories, /products (the menu)
 │   ├── addresses.py         /addresses (saved delivery addresses, 3 km check)
-│   └── orders.py            /orders (place, list, view, cancel)
+│   ├── orders.py            /orders (place, list, view, cancel)
+│   └── admin.py             /admin/* (kitchen order board, status moves, menu editing)
 ├── tests/                   pytest + moto (no AWS account touched)
 ├── scripts/
 │   ├── gen_lambda_sources.py   src/*.py  ->  terraform/lambda_src_*.tf
 │   ├── verify-auth.ps1         end-to-end check of auth against the deployed API
 │   ├── verify-catalog.ps1      check of the menu API + CloudFront photos
 │   ├── verify-addresses.ps1    check of the addresses API with a real account
-│   └── verify-orders.ps1       places one real order for tomorrow, then cancels it
+│   ├── verify-orders.ps1       places one real order for tomorrow, then cancels it
+│   └── verify-admin.ps1        kitchen + menu admin checks with an admin account
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (71 resources)
+## What gets created (83 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
 | Cognito User Pool | `wmh-users` | The user directory. Stores emails and password hashes, emails the confirmation and reset codes, issues JWTs. |
 | Cognito app client | `wmh-app` | How the mobile app identifies itself to the pool. Public (no secret), because anything in an APK can be extracted. |
-| Cognito group | `admin` | Members get `role: "admin"` (used from Part 6). |
-| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). |
+| Cognito group | `admin` | Members get `role: "admin"`: the Kitchen tab and Manage menu in the app, and the `/admin/*` routes. Added by hand (see "Make someone an admin"), so no email is in the repo. |
+| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
 | Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
 | IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query/delete items in `wmh-main`. Nothing else. |
-| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`. |
-| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 20 routes, a JWT authorizer on `/me`, `/addresses` and `/orders`, throttled to 50 req/s (burst 100). |
+| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders`, `wmh-admin` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`. |
+| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 28 routes, a JWT authorizer on `/me`, `/addresses`, `/orders` and `/admin/*` (admin.py also checks the `admin` group), throttled to 50 req/s (burst 100). |
 | S3 bucket | `wmh-media-630287363216` | Menu photos under `menu/`. Fully private: all public access blocked. |
 | CloudFront | `d2n5hm5b49hk3p.cloudfront.net` | CDN in front of the bucket (price class 200, includes India). The only reader of the bucket, via Origin Access Control. |
 | CloudWatch log groups | `/aws/lambda/wmh-*`, `/aws/apigateway/wmh-api` | 14-day retention. Access logs never include headers or bodies. |
@@ -72,6 +75,14 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `GET /orders` | JWT | – | `200 Order[]`: newest first, latest 50 |
 | `GET /orders/{id}` | JWT | – | `200 Order` |
 | `POST /orders/{id}/cancel` | JWT | – | `200 Order` (already cancelled → same answer) |
+| `GET /admin/orders?date=YYYY-MM-DD` | JWT + admin | – | `200 AdminOrder[]` for that delivery day (default today, IST), by slot then time |
+| `POST /admin/orders/{id}/status` | JWT + admin | `{status, reason?}` | `200 AdminOrder` |
+| `GET /admin/categories` | JWT + admin | – | `200 Category[]`, hidden ones included |
+| `POST /admin/categories` | JWT + admin | `{name, name_mr?, image_url?, sort_order?, is_active?}` | `201 Category` |
+| `PATCH /admin/categories/{id}` | JWT + admin | any of the POST fields | `200 Category` |
+| `GET /admin/products` | JWT + admin | – | `200 AdminProduct[]`, hidden ones included |
+| `POST /admin/products` | JWT + admin | `{category_id, name, price, name_mr?, description?, image_url?, is_veg?, has_spice_level?, is_available?, is_active?}` | `201 AdminProduct` |
+| `PATCH /admin/products/{id}` | JWT + admin | any of the POST fields | `200 AdminProduct` |
 
 Menu responses carry `Cache-Control: public, max-age=60`, so menu edits show up within a minute.
 
@@ -111,6 +122,20 @@ Order rules (all enforced by the server; the app shows the same ones):
 - Stored but not returned: `GSI1PK = ORDERDATE#<delivery_date>`, `GSI1SK = <slot hour>#<created_at>#<id>`,
   ready for the Part 6 kitchen index ("all orders for a day, by slot") without a data migration.
 
+Admin rules (Part 6):
+- **Who**: accounts in the Cognito group `admin`; everyone else gets `403 FORBIDDEN` on `/admin/*`.
+- **Status moves**, one step at a time: `CONFIRMED → PREPARING → OUT_FOR_DELIVERY → DELIVERED`; anything else
+  is `409 INVALID_STATUS_CHANGE`. `DELIVERED` also sets `payment_status: "paid"` for cash orders. Each move is
+  conditional on the status the admin saw, so two people tapping at once can't skip a step (`409 ORDER_CHANGED`).
+- **Kitchen cancel**: any order not yet delivered, with a `reason` of 3–120 characters, shown to the customer
+  as `cancel_reason` (`cancelled_by: "kitchen"`). Customer cancels record `cancelled_by: "customer"`.
+- `AdminOrder` = `Order` + `status_history: [{status, at, by}]` (`by` = `"customer"` or the admin's email).
+- **Menu**: `AdminProduct` = `Product` + `is_active`. `is_active: false` hides a dish from `GET /products` and
+  ordering it gives `409 PRODUCT_UNAVAILABLE`; `is_available: false` shows it as sold out. Prices ₹1–₹5,000
+  (100–500000 paise). New ids come from the name (`prd_kanda_bhaji`), with a random suffix if taken.
+  New dishes use their category's photo until photo upload exists (Part 6b). There's no delete: hide instead.
+- Orders placed before Part 6 have no `ORDERREF` record, so the kitchen can't move them (`404`).
+
 Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PASSWORD`,
 `EMAIL_TAKEN` (409), `USER_NOT_CONFIRMED` (403 → show the code screen), `INVALID_CODE`,
 `CODE_EXPIRED`, `ALREADY_CONFIRMED` (409), `INVALID_CREDENTIALS` (401),
@@ -118,6 +143,7 @@ Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PAS
 `OUT_OF_DELIVERY_AREA` (422), `LOCATION_REQUIRED`, `ADDRESS_LIMIT` (409),
 `BELOW_MINIMUM_ORDER` (422), `PAYMENT_METHOD_UNAVAILABLE`, `SLOT_UNAVAILABLE` (409),
 `PRODUCT_UNAVAILABLE` (409), `IDEMPOTENCY_CONFLICT` (409), `ORDER_NOT_CANCELLABLE` (409), `CONFLICT` (409),
+`FORBIDDEN` (403), `INVALID_STATUS_CHANGE` (409), `ORDER_CHANGED` (409),
 `EMAIL_DELIVERY_FAILED` (502), `EMAIL_CHANGE_NOT_SUPPORTED`, `CHALLENGE_REQUIRED`,
 `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`.
 
@@ -183,7 +209,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-161 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
+211 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
 with mocks, and `verify-auth.ps1` checks them for real.
 
 ## Verify after deploy
@@ -220,6 +246,13 @@ cancels it, so one cancelled order stays in that account's history:
 .\backend\scripts\verify-orders.ps1 -Email you+wmh1@gmail.com
 ```
 
+The kitchen and menu admin need an account in the `admin` group (see below). The script places one
+real order for tomorrow, moves it to Preparing, then cancels it from the kitchen; the menu is only read:
+
+```powershell
+.\backend\scripts\verify-admin.ps1 -Email owner@example.com -CustomerEmail you+wmh1@gmail.com
+```
+
 If PowerShell blocks a script: `Set-ExecutionPolicy -Scope Process Bypass`.
 
 Logs, if something fails:
@@ -229,6 +262,7 @@ aws logs tail /aws/lambda/wmh-auth --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-catalog --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-addresses --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-orders --since 15m --profile wmh --region ap-south-1
+aws logs tail /aws/lambda/wmh-admin --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/apigateway/wmh-api --since 15m --profile wmh --region ap-south-1
 ```
 
@@ -239,9 +273,32 @@ Gateway free tiers, DynamoDB on-demand pay-per-request, a few cents of CloudWatc
 Point-in-time recovery is billed per GB stored, which is tiny here. CloudFront's free tier
 covers 1 TB of transfer a month; the photos in S3 cost paise.
 
-## Changing the menu (until the admin screen in Part 6)
+## Make someone an admin
 
-The starting menu is in `terraform/menu_seed.tf`, but Terraform only writes it **once**: editing that file
-does not change existing rows. Until Part 6, change a dish in the AWS console: DynamoDB → Tables →
-`wmh-main` → Explore items → filter `PK = CATALOG` → edit the row (prices are integer paise, `9000` = ₹90;
-set `is_available` to `false` for "Sold out"). The app picks it up within a minute (pull down on Home to refresh).
+Admins are the members of the Cognito group `admin`. The account must first **sign up in the app**
+and confirm its email. Don't create it with "Create user" in the console: that gives it a temporary
+password that must be changed at first login, which the app can't do (login answers `CHALLENGE_REQUIRED`).
+
+In the AWS console: Cognito → User pools → `wmh-users` → **Groups** → `admin` → **Add user to group**
+→ pick the account. Or from PowerShell:
+
+```powershell
+aws cognito-idp admin-add-user-to-group --user-pool-id ap-south-1_Szcz11NPr --username owner@example.com --group-name admin --profile wmh --region ap-south-1
+# check
+aws cognito-idp admin-list-groups-for-user --user-pool-id ap-south-1_Szcz11NPr --username owner@example.com --profile wmh --region ap-south-1
+# remove
+aws cognito-idp admin-remove-user-from-group --user-pool-id ap-south-1_Szcz11NPr --username owner@example.com --group-name admin --profile wmh --region ap-south-1
+```
+
+The group travels inside the login token, so **log out and back in** in the app afterwards (or wait up
+to an hour for the automatic token refresh). The Kitchen tab and Account → Kitchen tools → Manage menu
+then appear. This is done by hand on purpose, so no one's email is committed to this public repo.
+
+## Changing the menu
+
+Use the app: Account → Kitchen tools → **Manage menu** (admins only). Prices, names, sold out, hide/show,
+new dishes and categories. Customers see changes within a minute (pull down on Home to refresh).
+
+The starting menu is in `terraform/menu_seed.tf`, but Terraform only writes it **once**
+(`ignore_changes`): editing that file doesn't change existing rows, and Terraform never undoes changes
+made in the app.

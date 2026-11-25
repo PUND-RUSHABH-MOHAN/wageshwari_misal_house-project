@@ -25,6 +25,10 @@ locals {
       handler = "orders.handler"
       files   = ["common.py", "users.py", "addresses.py", "orders.py"]
     }
+    admin = {
+      handler = "admin.handler"
+      files   = ["common.py", "users.py", "addresses.py", "orders.py", "catalog.py", "admin.py"]
+    }
   }
 
   # Settings only one function needs, so the others aren't redeployed when they change.

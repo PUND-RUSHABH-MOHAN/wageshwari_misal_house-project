@@ -29,3 +29,10 @@ export const shopDirectionsUrl = () =>
 export const openShopDirections = () => Linking.openURL(shopDirectionsUrl());
 
 export type Coords = { latitude: number; longitude: number };
+
+/** Open a point (e.g. a customer's delivery pin) in Google Maps. No API key needed. */
+export const openMapAt = ({ latitude, longitude }: Coords) =>
+  Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`);
+
+/** Start a phone call (10-digit Indian mobile). */
+export const callPhone = (phone: string) => Linking.openURL(`tel:+91${phone}`);

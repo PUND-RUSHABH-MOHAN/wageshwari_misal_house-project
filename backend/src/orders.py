@@ -24,7 +24,9 @@ Storage (table wmh-main)
   PK = "USER#<sub>",  SK = "ORDER#<id>"         the order (ids sort by time)
   PK = "USER#<sub>",  SK = "IDEMP#<key>"        idempotency record, expires_at = TTL
   PK = "COUNTER",     SK = "ORDER#<YYYYMMDD>"   daily running number for order_number
-  Orders also carry GSI1PK = "ORDERDATE#<delivery_date>" / GSI1SK for the part 6 admin index.
+  PK = "ORDERREF#<id>", SK = "ORDER"            which user an order belongs to (admin lookups)
+  Orders also carry GSI1PK = "ORDERDATE#<delivery_date>" / GSI1SK: index GSI1 lists a day's
+  orders by slot for the kitchen (admin.py).
 """
 
 from __future__ import annotations
@@ -252,6 +254,8 @@ def _price_lines(order_id: str, lines: list[dict]) -> list[dict]:
         if product is None:
             raise ApiError(409, "PRODUCT_UNAVAILABLE", "A dish in your cart is no longer on the menu. Please remove it.")
         name = product.get("name", line["product_id"])
+        if not product.get("is_active", True):
+            raise ApiError(409, "PRODUCT_UNAVAILABLE", f"{name} is no longer on the menu. Please remove it.")
         if not product.get("is_available", True):
             raise ApiError(409, "PRODUCT_UNAVAILABLE", f"{name} is sold out right now. Please remove it to continue.")
         if "spice_level" in line and not product.get("has_spice_level", False):
@@ -290,7 +294,13 @@ def _next_order_number(now: datetime) -> str:
 ORDER_FIELDS = (
     "id", "order_number", "user_id", "address_snapshot", "delivery_date", "slot_label", "status",
     "subtotal", "delivery_fee", "tax", "total", "payment_method", "payment_status", "created_at", "items",
+    "cancelled_by", "cancel_reason",  # only on cancelled orders; cancel_reason only from the kitchen
 )
+
+
+def history_entry(status: str, at: str, by: str) -> dict:
+    """One status_history element (kept on the order; the admin view shows it)."""
+    return {"status": status, "at": at, "by": by}
 
 
 def to_order(item: dict) -> dict:
@@ -324,6 +334,7 @@ def _replay(user_id: str, record: dict, request_hash: str) -> dict:
 
 
 def _put_order_and_record(order: dict, record: dict, now: datetime) -> None:
+    """One transaction: the order, its ORDERREF pointer, and the idempotency record."""
     # The resource's client converts plain Python values itself (no {"S": ...} wrapping).
     client = users.table().meta.client
     name = users.table().name
@@ -333,6 +344,18 @@ def _put_order_and_record(order: dict, record: dict, now: datetime) -> None:
                 "Put": {
                     "TableName": name,
                     "Item": order,
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }
+            },
+            {
+                "Put": {
+                    "TableName": name,
+                    "Item": {
+                        "PK": f"ORDERREF#{order['id']}",
+                        "SK": "ORDER",
+                        "entity": "ORDERREF",
+                        "user_id": order["user_id"],
+                    },
                     "ConditionExpression": "attribute_not_exists(PK)",
                 }
             },
@@ -399,7 +422,8 @@ def create_order(event: dict) -> dict:
             "created_at": created_at,
             "updated_at": created_at,
             "items": lines,
-            # For the part 6 admin index ("all orders for a delivery date, by slot").
+            "status_history": [history_entry("CONFIRMED", created_at, "customer")],
+            # Index GSI1: the kitchen's "all orders for a delivery date, by slot" (admin.py).
             "GSI1PK": f"ORDERDATE#{request['delivery_date']}",
             "GSI1SK": f"{start_hour:02d}#{created_at}#{order_id}",
         }
@@ -451,7 +475,10 @@ def cancel_order(event: dict) -> dict:
     try:
         updated = users.table().update_item(
             Key=_key(user_id, f"ORDER#{current['id']}"),
-            UpdateExpression="SET #s = :cancelled, cancelled_at = :now, updated_at = :now",
+            UpdateExpression=(
+                "SET #s = :cancelled, cancelled_at = :now, updated_at = :now, cancelled_by = :by, "
+                "status_history = list_append(if_not_exists(status_history, :empty), :entry)"
+            ),
             ConditionExpression="#s IN (:pending, :confirmed)",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
@@ -459,6 +486,9 @@ def cancel_order(event: dict) -> dict:
                 ":now": now,
                 ":pending": CANCELLABLE[0],
                 ":confirmed": CANCELLABLE[1],
+                ":by": "customer",
+                ":empty": [],
+                ":entry": [history_entry("CANCELLED", now, "customer")],
             },
             ReturnValues="ALL_NEW",
         )["Attributes"]

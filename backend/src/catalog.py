@@ -2,7 +2,8 @@
 
 Routes
   GET /categories   active categories, by sort_order        -> Category[]
-  GET /products     every product, sold-out ones included   -> Product[]
+  GET /products     every visible product, sold-out ones included   -> Product[]
+                    (dishes hidden by the kitchen, is_active = false, are left out)
 
 Storage (single table, one partition for the whole menu):
   PK = "CATALOG", SK = "CATEGORY#<id>"   a category
@@ -83,7 +84,7 @@ def get_categories(event: dict) -> dict:  # noqa: ARG001 - route signature
 
 
 def get_products(event: dict) -> dict:  # noqa: ARG001 - route signature
-    products = [to_product(i) for i in _query("PRODUCT#")]
+    products = [to_product(i) for i in _query("PRODUCT#") if i.get("is_active", True)]
     products.sort(key=lambda p: (p["category_id"], p["name"]))
     return response(200, products, CACHE_HEADERS)
 

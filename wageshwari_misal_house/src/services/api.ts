@@ -7,7 +7,19 @@
  *
  * Authenticated calls take an ID token; `src/services/session.ts` supplies a fresh one.
  */
-import type { Address, AddressInput, Category, Order, PlaceOrderInput, Product, SpiceLevel, User } from '@/types';
+import type {
+  Address,
+  AddressInput,
+  AdminOrder,
+  AdminProduct,
+  Category,
+  Order,
+  OrderStatus,
+  PlaceOrderInput,
+  Product,
+  SpiceLevel,
+  User,
+} from '@/types';
 
 const BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const TIMEOUT_MS = 15000;
@@ -201,4 +213,46 @@ export const orderApi = {
     request<Order>('POST', '/orders', { token, body, headers: { 'Idempotency-Key': idempotencyKey } }),
   cancel: (token: string, id: string) =>
     request<Order>('POST', `/orders/${encodeURIComponent(id)}/cancel`, { token }),
+};
+
+// ---------------------------------------------------------------------------
+// Admin (part 6). Needs an account in the Cognito `admin` group; others get 403 FORBIDDEN.
+// ---------------------------------------------------------------------------
+export type CategoryInput = Partial<Pick<Category, 'name' | 'name_mr' | 'image_url' | 'sort_order' | 'is_active'>>;
+export type ProductInput = Partial<
+  Pick<
+    AdminProduct,
+    | 'category_id'
+    | 'name'
+    | 'name_mr'
+    | 'description'
+    | 'price'
+    | 'image_url'
+    | 'is_veg'
+    | 'has_spice_level'
+    | 'is_available'
+    | 'is_active'
+  >
+>;
+
+export const adminApi = {
+  /** Orders for one delivery day (YYYY-MM-DD, IST), by slot then time. */
+  orders: (token: string, date: string) =>
+    request<AdminOrder[]>('GET', `/admin/orders?date=${encodeURIComponent(date)}`, { token }),
+  /** Next step (PREPARING / OUT_FOR_DELIVERY / DELIVERED), or CANCELLED with a reason. */
+  setStatus: (token: string, id: string, status: OrderStatus, reason?: string) =>
+    request<AdminOrder>('POST', `/admin/orders/${encodeURIComponent(id)}/status`, {
+      token,
+      body: reason === undefined ? { status } : { status, reason },
+    }),
+  categories: (token: string) => request<Category[]>('GET', '/admin/categories', { token }),
+  createCategory: (token: string, body: CategoryInput) =>
+    request<Category>('POST', '/admin/categories', { token, body }),
+  updateCategory: (token: string, id: string, body: CategoryInput) =>
+    request<Category>('PATCH', `/admin/categories/${encodeURIComponent(id)}`, { token, body }),
+  products: (token: string) => request<AdminProduct[]>('GET', '/admin/products', { token }),
+  createProduct: (token: string, body: ProductInput) =>
+    request<AdminProduct>('POST', '/admin/products', { token, body }),
+  updateProduct: (token: string, id: string, body: ProductInput) =>
+    request<AdminProduct>('PATCH', `/admin/products/${encodeURIComponent(id)}`, { token, body }),
 };

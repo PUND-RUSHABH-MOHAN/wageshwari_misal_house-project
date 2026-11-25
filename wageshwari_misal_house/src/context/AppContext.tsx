@@ -313,6 +313,8 @@ interface AppContextValue {
   authReady: boolean;
   restoreError: string | null;
   currentUser: User | null;
+  /** True for accounts in the Cognito `admin` group (Kitchen tab, Manage menu). */
+  isAdmin: boolean;
   categories: Category[];
   products: Product[];
   catalogStatus: CatalogStatus;
@@ -512,6 +514,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const value: AppContextValue = {
     currentUser: state.currentUser,
+    isAdmin: state.currentUser?.role === 'admin',
     categories: [...state.categories]
       .filter((c) => c.is_active)
       .sort((a, b) => a.sort_order - b.sort_order),
