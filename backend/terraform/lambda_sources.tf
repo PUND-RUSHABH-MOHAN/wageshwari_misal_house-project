@@ -3,6 +3,7 @@
 
 locals {
   lambda_sources = {
+    "addresses.py" = join("", [local.lambda_src_addresses_1, local.lambda_src_addresses_2, local.lambda_src_addresses_3, local.lambda_src_addresses_4, local.lambda_src_addresses_5])
     "auth.py" = join("", [local.lambda_src_auth_1, local.lambda_src_auth_2, local.lambda_src_auth_3, local.lambda_src_auth_4])
     "catalog.py" = join("", [local.lambda_src_catalog_1, local.lambda_src_catalog_2])
     "common.py" = join("", [local.lambda_src_common_1, local.lambda_src_common_2, local.lambda_src_common_3])

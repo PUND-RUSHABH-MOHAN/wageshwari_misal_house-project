@@ -8,6 +8,7 @@ import { Button, Tag } from '@/components/ui';
 import { Colors, Radius, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 import { formatAddress } from '@/utils/format';
+import { formatKm } from '@/utils/geo';
 
 /** Choose the delivery address for checkout, or add a new one inline. */
 export function AddressPickerModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
@@ -58,6 +59,7 @@ export function AddressPickerModal({ visible, onClose }: { visible: boolean; onC
                   {a.receiver_name} · {a.receiver_phone}
                 </Text>
                 <Text style={styles.addr}>{formatAddress(a)}</Text>
+                <Text style={styles.distance}>{formatKm(a.distance_km)} from the hotel</Text>
               </View>
             </Pressable>
           );
@@ -69,8 +71,8 @@ export function AddressPickerModal({ visible, onClose }: { visible: boolean; onC
         visible={visible && formOpen}
         defaults={{ receiver_name: currentUser?.name, receiver_phone: currentUser?.phone }}
         onClose={() => setFormOpen(false)}
-        onSave={(input) => {
-          saveAddress(input);
+        onSave={async (input) => {
+          await saveAddress(input); // throws -> the form shows the error and stays open
           setFormOpen(false);
           onClose();
         }}
@@ -96,4 +98,5 @@ const styles = StyleSheet.create({
   label: { fontSize: 15, fontWeight: '800', color: Colors.text },
   receiver: { fontSize: 13, fontWeight: '600', color: Colors.text },
   addr: { fontSize: 13, color: Colors.textMuted, lineHeight: 18 },
+  distance: { fontSize: 12, color: Colors.textSubtle },
 });

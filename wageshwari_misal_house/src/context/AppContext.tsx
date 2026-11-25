@@ -1,14 +1,15 @@
 /**
  * Global client-side store (React Context + useReducer).
  *
- * Auth, the profile and the menu talk to the real backend (src/services/api.ts + session.ts).
- * Addresses and orders are still local mock data: each action's comment names the
- * endpoint it will be replaced by (roadmap parts 4–5).
+ * Auth, the profile, the menu and saved addresses talk to the real backend
+ * (src/services/api.ts + session.ts). Orders are still local mock data: each action's
+ * comment names the endpoint it will be replaced by (roadmap part 5).
  */
 import { createContext, useContext, useEffect, useReducer, useRef, type ReactNode } from 'react';
 
-import { buildSeedOrders, MOCK_ADDRESSES, MOCK_USER } from '@/data/mock-data';
+import { buildSeedOrders } from '@/data/mock-data';
 import {
+  addressApi,
   authApi,
   catalogApi,
   errorMessage,
@@ -58,6 +59,9 @@ interface AppState {
   catalogStatus: CatalogStatus;
   catalogError: string | null;
   addresses: Address[];
+  /** GET /addresses load state (after login). */
+  addressesStatus: LoadStatus;
+  addressesError: string | null;
   cart: CartItem[];
   orders: Order[];
   /** Address chosen for checkout; falls back to the default address. */
@@ -76,7 +80,9 @@ const initialState: AppState = {
   products: [],
   catalogStatus: 'loading',
   catalogError: null,
-  addresses: MOCK_ADDRESSES,
+  addresses: [],
+  addressesStatus: 'idle',
+  addressesError: null,
   cart: [],
   orders: buildSeedOrders(),
   selectedAddressId: null,
@@ -85,6 +91,7 @@ const initialState: AppState = {
 };
 
 export type CatalogStatus = 'loading' | 'ready' | 'error';
+export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 type Action =
   | { type: 'CATALOG_LOADING' }
@@ -103,9 +110,9 @@ type Action =
   | { type: 'CANCEL_ORDER'; id: ID }
   | { type: 'DISMISS_ORDER_BANNER' }
   | { type: 'SET_USER'; user: User }
-  | { type: 'UPSERT_ADDRESS'; address: Address }
-  | { type: 'DELETE_ADDRESS'; id: ID }
-  | { type: 'SET_DEFAULT_ADDRESS'; id: ID }
+  | { type: 'ADDRESSES_LOADING' }
+  | { type: 'ADDRESSES_LOADED'; addresses: Address[]; select?: ID }
+  | { type: 'ADDRESSES_FAILED'; message: string }
   | { type: 'SELECT_ADDRESS'; id: ID };
 
 // ---------------------------------------------------------------------------
@@ -118,14 +125,6 @@ const sameLine = (a: CartItem, b: CartItem) =>
   a.product_id === b.product_id &&
   a.spice_level === b.spice_level &&
   (a.note ?? '').trim() === (b.note ?? '').trim();
-
-/** Guarantees exactly one default address (if any exist). */
-function normalizeDefault(addresses: Address[], preferredId?: ID): Address[] {
-  if (addresses.length === 0) return addresses;
-  const defaultId =
-    preferredId ?? addresses.find((a) => a.is_default)?.id ?? addresses[0].id;
-  return addresses.map((a) => ({ ...a, is_default: a.id === defaultId }));
-}
 
 /** WMH-YYYYMMDD-NNNN with a per-day running sequence. */
 function nextOrderNumber(orders: Order[], date: Date): string {
@@ -194,9 +193,7 @@ function reducer(state: AppState, action: Action): AppState {
         authReady: true,
         restoreError: action.restoreError ?? null,
         currentUser: action.user,
-        selectedAddressId: action.user
-          ? (state.addresses.find((a) => a.user_id === action.user?.id && a.is_default)?.id ?? null)
-          : null,
+        selectedAddressId: null,
       };
 
     case 'LOGIN': // POST /auth/login
@@ -204,7 +201,9 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         restoreError: null,
         currentUser: action.user,
-        selectedAddressId: state.addresses.find((a) => a.is_default)?.id ?? null,
+        addresses: [],
+        addressesStatus: 'idle',
+        selectedAddressId: null,
       };
 
     case 'LOGOUT': // POST /auth/logout
@@ -212,6 +211,9 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         currentUser: null,
         cart: [],
+        addresses: [],
+        addressesStatus: 'idle',
+        addressesError: null,
         selectedAddressId: null,
         lastPlacedOrderId: null,
       };
@@ -285,35 +287,30 @@ function reducer(state: AppState, action: Action): AppState {
     case 'SET_USER': // GET /me | PATCH /me
       return state.currentUser ? { ...state, currentUser: action.user } : state;
 
-    case 'UPSERT_ADDRESS': {
-      // POST /addresses | PATCH /addresses/:id
-      const exists = state.addresses.some((a) => a.id === action.address.id);
-      const list = exists
-        ? state.addresses.map((a) => (a.id === action.address.id ? action.address : a))
-        : [...state.addresses, action.address];
-      const addresses = normalizeDefault(
-        list,
-        action.address.is_default ? action.address.id : undefined,
-      );
+    case 'ADDRESSES_LOADING':
+      return { ...state, addressesStatus: 'loading', addressesError: null };
+
+    case 'ADDRESSES_LOADED': {
+      // GET /addresses. The server owns the list (and which one is default); the app
+      // re-reads it after every change instead of editing it locally.
+      const ids = new Set(action.addresses.map((a) => a.id));
+      const selectedAddressId =
+        action.select && ids.has(action.select)
+          ? action.select
+          : state.selectedAddressId && ids.has(state.selectedAddressId)
+            ? state.selectedAddressId
+            : null; // falls back to the default address
       return {
         ...state,
-        addresses,
-        selectedAddressId: exists ? state.selectedAddressId : action.address.id,
+        addresses: action.addresses,
+        addressesStatus: 'ready',
+        addressesError: null,
+        selectedAddressId,
       };
     }
 
-    case 'DELETE_ADDRESS': {
-      // DELETE /addresses/:id
-      const addresses = normalizeDefault(state.addresses.filter((a) => a.id !== action.id));
-      const selectedAddressId =
-        state.selectedAddressId === action.id
-          ? (addresses.find((a) => a.is_default)?.id ?? null)
-          : state.selectedAddressId;
-      return { ...state, addresses, selectedAddressId };
-    }
-
-    case 'SET_DEFAULT_ADDRESS': // PATCH /addresses/:id { is_default: true }
-      return { ...state, addresses: normalizeDefault(state.addresses, action.id) };
+    case 'ADDRESSES_FAILED':
+      return { ...state, addressesStatus: 'error', addressesError: action.message };
 
     case 'SELECT_ADDRESS':
       return { ...state, selectedAddressId: action.id };
@@ -338,6 +335,10 @@ interface AppContextValue {
   /** Re-fetch the menu (pull-to-refresh, Retry). Never throws. */
   reloadCatalog: () => Promise<void>;
   addresses: Address[];
+  addressesStatus: LoadStatus;
+  addressesError: string | null;
+  /** Re-fetch GET /addresses (Retry). Never throws. */
+  reloadAddresses: () => Promise<void>;
   cart: CartItem[];
   orders: Order[];
   lastPlacedOrderId: ID | null;
@@ -369,10 +370,11 @@ interface AppContextValue {
   placeOrder: (input: PlaceOrderInput) => Order;
   cancelOrder: (orderId: ID) => void;
   dismissOrderBanner: () => void;
-  // addresses
-  saveAddress: (input: AddressInput) => Address;
-  deleteAddress: (addressId: ID) => void;
-  setDefaultAddress: (addressId: ID) => void;
+  // addresses (the async ones throw ApiError; screens show `error.message`)
+  /** POST /addresses (no id) or PATCH /addresses/:id. A new address is selected for checkout. */
+  saveAddress: (input: AddressInput) => Promise<Address>;
+  deleteAddress: (addressId: ID) => Promise<void>;
+  setDefaultAddress: (addressId: ID) => Promise<void>;
   selectAddress: (addressId: ID) => void;
 }
 
@@ -402,6 +404,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     loadCatalog();
   }, []);
 
+  // GET /addresses for the signed-in user. `select` picks an address for checkout afterwards.
+  const loadAddresses = async (select?: ID) => {
+    dispatch({ type: 'ADDRESSES_LOADING' });
+    try {
+      const addresses = await withAuth((t) => addressApi.list(t));
+      dispatch({ type: 'ADDRESSES_LOADED', addresses, select });
+    } catch (e) {
+      dispatch({ type: 'ADDRESSES_FAILED', message: errorMessage(e) });
+    }
+  };
+
   // Startup: restore a saved session, and drop back to login if it ever expires.
   useEffect(() => {
     setSessionExpiredHandler(() => dispatch({ type: 'LOGOUT' }));
@@ -410,7 +423,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const restored = await restoreSession();
         const user = restored === 'restored' ? await withAuth((t) => meApi.get(t)) : null;
-        if (!cancelled) dispatch({ type: 'AUTH_READY', user });
+        if (!cancelled) {
+          dispatch({ type: 'AUTH_READY', user });
+          if (user) loadAddresses();
+        }
       } catch (e) {
         if (!cancelled) {
           dispatch({
@@ -434,6 +450,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await startSession(res);
     pendingLogin.current = null;
     dispatch({ type: 'LOGIN', user: res.user });
+    loadAddresses(); // not awaited: login finishes as soon as the tokens are stored
   };
 
   const hasLiveOrders = state.liveOrderIds.length > 0;
@@ -472,6 +489,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     catalogError: state.catalogError,
     reloadCatalog: loadCatalog,
     addresses: userAddresses,
+    addressesStatus: state.addressesStatus,
+    addressesError: state.addressesError,
+    reloadAddresses: () => loadAddresses(),
     cart: state.cart,
     orders: userOrders,
     lastPlacedOrderId: state.lastPlacedOrderId,
@@ -593,22 +613,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     cancelOrder: (id) => dispatch({ type: 'CANCEL_ORDER', id }),
     dismissOrderBanner: () => dispatch({ type: 'DISMISS_ORDER_BANNER' }),
 
-    saveAddress: (input) => {
-      const user = state.currentUser ?? MOCK_USER;
-      const address: Address = {
-        ...input,
-        id: input.id ?? newId('adr'),
-        user_id: user.id,
-        city: 'Pune',
-        line2: input.line2?.trim() || undefined,
-        landmark: input.landmark?.trim() || undefined,
-        is_default: input.is_default || userAddresses.length === 0,
-      };
-      dispatch({ type: 'UPSERT_ADDRESS', address });
-      return address;
+    saveAddress: async (input) => {
+      const { id, ...body } = input;
+      const payload = { ...body, line2: body.line2?.trim() ?? '', landmark: body.landmark?.trim() ?? '' };
+      const saved = id
+        ? await withAuth((t) => addressApi.update(t, id, payload)) // PATCH /addresses/:id
+        : await withAuth((t) => addressApi.create(t, payload)); // POST /addresses
+      await loadAddresses(id ? undefined : saved.id); // a new address becomes the checkout address
+      return saved;
     },
-    deleteAddress: (id) => dispatch({ type: 'DELETE_ADDRESS', id }),
-    setDefaultAddress: (id) => dispatch({ type: 'SET_DEFAULT_ADDRESS', id }),
+    deleteAddress: async (id) => {
+      await withAuth((t) => addressApi.remove(t, id)); // DELETE /addresses/:id
+      await loadAddresses();
+    },
+    setDefaultAddress: async (id) => {
+      await withAuth((t) => addressApi.update(t, id, { is_default: true })); // PATCH /addresses/:id
+      await loadAddresses();
+    },
     selectAddress: (id) => dispatch({ type: 'SELECT_ADDRESS', id }),
   };
 

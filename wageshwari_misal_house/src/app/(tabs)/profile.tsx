@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AddressFormModal } from '@/components/AddressFormModal';
@@ -11,10 +11,24 @@ import { useApp } from '@/context/AppContext';
 import { errorMessage } from '@/services/api';
 import type { Address } from '@/types';
 import { formatAddress, formatPhone, isValidIndianMobile } from '@/utils/format';
+import { formatKm } from '@/utils/geo';
 
 export default function ProfileScreen() {
-  const { currentUser, addresses, orders, updateUser, saveAddress, deleteAddress, setDefaultAddress, logout } =
-    useApp();
+  const {
+    currentUser,
+    addresses,
+    addressesStatus,
+    addressesError,
+    reloadAddresses,
+    orders,
+    updateUser,
+    saveAddress,
+    deleteAddress,
+    setDefaultAddress,
+    logout,
+  } = useApp();
+  /** Address id with a delete / set-default request in flight. */
+  const [busyAddressId, setBusyAddressId] = useState<string | null>(null);
 
   const [editingPhone, setEditingPhone] = useState(false);
   const [phoneDraft, setPhoneDraft] = useState('');
@@ -56,6 +70,23 @@ export default function ProfileScreen() {
       setSavingPhone(false);
     }
   };
+
+  const runAddressAction = async (id: string, action: () => Promise<void>) => {
+    setBusyAddressId(id);
+    try {
+      await action();
+    } catch (e) {
+      Alert.alert("Couldn't update the address", errorMessage(e));
+    } finally {
+      setBusyAddressId(null);
+    }
+  };
+
+  const confirmDelete = (a: Address) =>
+    Alert.alert('Delete this address?', `${a.label}: ${a.line1}`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => runAddressAction(a.id, () => deleteAddress(a.id)) },
+    ]);
 
   const signOut = async () => {
     setSigningOut(true);
@@ -137,7 +168,18 @@ export default function ProfileScreen() {
           <View style={styles.addressList}>
             {sortedAddresses.length === 0 ? (
               <Card>
-                <Text style={styles.muted}>No saved addresses. Add one to speed up checkout.</Text>
+                {addressesStatus === 'loading' || addressesStatus === 'idle' ? (
+                  <Text style={styles.muted}>Loading your addresses…</Text>
+                ) : addressesStatus === 'error' ? (
+                  <View style={styles.inline}>
+                    <Text style={[styles.muted, styles.flex]}>{addressesError}</Text>
+                    <TextLink title="Retry" onPress={reloadAddresses} />
+                  </View>
+                ) : (
+                  <Text style={styles.muted}>
+                    No saved addresses. Add one to speed up checkout (up to 5, within 3 km of the hotel).
+                  </Text>
+                )}
               </Card>
             ) : null}
             {sortedAddresses.map((a) => (
@@ -156,9 +198,19 @@ export default function ProfileScreen() {
                   {a.receiver_name} · {formatPhone(a.receiver_phone)}
                 </Text>
                 <Text style={styles.addressText}>{formatAddress(a)}</Text>
-                <View style={styles.addressActions}>
-                  {!a.is_default ? <TextLink title="Set as default" onPress={() => setDefaultAddress(a.id)} /> : null}
-                  <Pressable onPress={() => deleteAddress(a.id)} hitSlop={8} style={styles.inline}>
+                <Text style={styles.addressDistance}>{formatKm(a.distance_km)} from the hotel</Text>
+                <View style={[styles.addressActions, busyAddressId === a.id && styles.busy]}>
+                  {!a.is_default ? (
+                    <TextLink
+                      title="Set as default"
+                      onPress={() => busyAddressId || runAddressAction(a.id, () => setDefaultAddress(a.id))}
+                    />
+                  ) : null}
+                  <Pressable
+                    onPress={() => busyAddressId || confirmDelete(a)}
+                    hitSlop={8}
+                    style={styles.inline}
+                    accessibilityLabel={`Delete ${a.label} address`}>
                     <Icon name="trash" size={14} color={Colors.danger} />
                     <Text style={styles.deleteText}>Remove</Text>
                   </Pressable>
@@ -202,8 +254,8 @@ export default function ProfileScreen() {
         initial={addressTarget ?? null}
         defaults={{ receiver_name: currentUser.name, receiver_phone: currentUser.phone }}
         onClose={() => setAddressTarget(undefined)}
-        onSave={(input) => {
-          saveAddress(input);
+        onSave={async (input) => {
+          await saveAddress(input); // throws -> the form shows the error and stays open
           setAddressTarget(undefined);
         }}
       />
@@ -274,6 +326,8 @@ const styles = StyleSheet.create({
   signOut: { marginTop: Spacing.sm },
   version: { textAlign: 'center', fontSize: 12, color: Colors.textSubtle },
   shopCard: { flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start' },
+  addressDistance: { fontFamily: Fonts.regular, fontSize: 12, color: Colors.textSubtle },
+  busy: { opacity: 0.4 },
   shopName: { fontFamily: Fonts.bold, fontSize: 16, color: Colors.text },
   shopLine: { fontFamily: Fonts.regular, fontSize: 14, lineHeight: 20, color: Colors.textMuted },
 });

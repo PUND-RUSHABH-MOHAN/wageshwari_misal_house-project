@@ -28,7 +28,8 @@ export interface User {
 // addresses
 // ---------------------------------------------------------------------------
 export type AddressLabel = 'Home' | 'Work' | 'Other';
-export type ServiceCity = 'Pune';
+/** The hotel's city (Chandanzira, Jalna). The server sets it on every address. */
+export type ServiceCity = 'Jalna';
 
 export interface Address {
   id: ID;
@@ -41,11 +42,16 @@ export interface Address {
   landmark?: string;
   city: ServiceCity;
   pincode: string;
+  /** GPS position captured on the phone at this address. */
+  latitude: number;
+  longitude: number;
+  /** Straight-line distance from the hotel, computed by the server. Read-only. */
+  distance_km: number;
   is_default: boolean;
 }
 
 /** Payload for create (no id) / update (with id) address endpoints. */
-export type AddressInput = Omit<Address, 'id' | 'user_id' | 'city'> & { id?: ID };
+export type AddressInput = Omit<Address, 'id' | 'user_id' | 'city' | 'distance_km'> & { id?: ID };
 
 // ---------------------------------------------------------------------------
 // categories & products

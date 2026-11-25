@@ -90,7 +90,9 @@ export default function HomeScreen() {
       : 'All dishes';
 
   const addressLine = selectedAddress
-    ? [selectedAddress.line1, selectedAddress.line2, `Pune ${selectedAddress.pincode}`].filter(Boolean).join(', ')
+    ? [selectedAddress.line1, selectedAddress.line2, `${selectedAddress.city} ${selectedAddress.pincode}`]
+        .filter(Boolean)
+        .join(', ')
     : 'Tap to add a delivery address';
 
   const header = (

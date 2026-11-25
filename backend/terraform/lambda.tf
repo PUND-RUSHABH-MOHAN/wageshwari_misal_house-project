@@ -17,6 +17,10 @@ locals {
       handler = "catalog.handler"
       files   = ["common.py", "catalog.py"]
     }
+    addresses = {
+      handler = "addresses.handler"
+      files   = ["common.py", "users.py", "addresses.py"]
+    }
   }
 }
 
@@ -59,6 +63,10 @@ resource "aws_lambda_function" "fn" {
       TABLE_NAME          = aws_dynamodb_table.main.name
       USER_POOL_CLIENT_ID = aws_cognito_user_pool_client.app.id
       LOG_LEVEL           = "INFO"
+      SHOP_LATITUDE       = tostring(var.shop_latitude)
+      SHOP_LONGITUDE      = tostring(var.shop_longitude)
+      DELIVERY_RADIUS_KM  = tostring(var.delivery_radius_km)
+      SHOP_CITY           = var.shop_city
     }
   }
 

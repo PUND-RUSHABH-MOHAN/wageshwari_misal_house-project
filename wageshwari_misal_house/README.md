@@ -98,8 +98,14 @@ Home shows a spinner, then the menu, or "Couldn't load the menu" with **Try agai
 to refresh. Photos come from CloudFront (`image_url`); the photos bundled in the app show while they
 load and if they fail. A menu refresh also updates prices / sold-out state of items already in the cart.
 
-**Still mock data until their backend parts land:** addresses (part 4) and orders (part 5).
-They live in memory and reset when the app restarts.
+**Live (Part 4):** saved addresses. Loaded after login (`GET /addresses`); add / edit / delete /
+set default call the API and then re-read the list, so the server decides which one is default.
+Adding an address needs the phone's GPS position ("Use my current location", `expo-location`); the
+form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
+area are pre-filled from the position when empty. Delete asks for confirmation.
+
+**Still mock data until its backend part lands:** orders (part 5). They live in memory and
+reset when the app restarts.
 Phone + OTP login is removed from the login screen until part 8.
 
 ### 4.2 Running against the backend
@@ -121,10 +127,10 @@ Change the API URL in `.env` (and `eas.json` for cloud builds), then restart wit
 | Home | initial data | `GET /categories`, `GET /products` | **live** (`AppContext` → `loadCatalog`) |
 | Profile | current user | `GET /me` | `mock-data.ts` → `MOCK_USER` |
 | Profile | `updateUser()` | `PATCH /me` | `AppContext.tsx` → `UPDATE_USER` |
-| Profile / Cart | addresses list | `GET /addresses` | `mock-data.ts` → `MOCK_ADDRESSES` |
-| Profile / Cart | `saveAddress()` | `POST /addresses` (new) · `PATCH /addresses/:id` (edit) | `AppContext.tsx` → `UPSERT_ADDRESS` |
-| Profile | `deleteAddress()` | `DELETE /addresses/:id` | `AppContext.tsx` → `DELETE_ADDRESS` |
-| Profile | `setDefaultAddress()` | `PATCH /addresses/:id` `{ "is_default": true }` | `AppContext.tsx` → `SET_DEFAULT_ADDRESS` |
+| Profile / Cart | addresses list | `GET /addresses` | **live** (`AppContext` → `loadAddresses`) |
+| Profile / Cart | `saveAddress()` | `POST /addresses` (new) · `PATCH /addresses/:id` (edit) | **live** |
+| Profile | `deleteAddress()` | `DELETE /addresses/:id` | **live** |
+| Profile | `setDefaultAddress()` | `PATCH /addresses/:id` `{ "is_default": true }` | **live** |
 | Cart | `placeOrder()` | `POST /orders` | `AppContext.tsx` → `PLACE_ORDER` |
 | Orders | order history | `GET /orders` | `mock-data.ts` → `buildSeedOrders()` |
 | Orders | live status | `GET /orders/:id` (polling) or a websocket | `AppContext.tsx` → `ADVANCE_LIVE_ORDERS` |
@@ -282,11 +288,14 @@ Response: the created **Order** (see 5.5).
     "label": "Home",
     "receiver_name": "Tushar Kulange",
     "receiver_phone": "9876543210",
-    "line1": "Flat 12, Sai Residency",
-    "line2": "Kothrud",
-    "landmark": "Karishma Society",
-    "city": "Pune",
-    "pincode": "411038",
+    "line1": "Plot 12, Sai Residency",
+    "line2": "Ekta Nagar, Chandanzira",
+    "landmark": "Panchamukhi Nagar",
+    "city": "Jalna",
+    "pincode": "431203",
+    "latitude": 19.8605,
+    "longitude": 75.8558,
+    "distance_km": 0.57,
     "is_default": true
   },
   "delivery_date": "2026-11-13",
@@ -338,26 +347,30 @@ Response: the created **Order** (see 5.5).
 **`GET /me`** and **`PATCH /me`** use the **User** object from 5.2.
 `PATCH /me` accepts any of `name`, `phone`, `email`.
 
-**`GET /addresses`** returns `Address[]`. **`POST /addresses`** and
-**`PATCH /addresses/:id`** accept the body below (no `id`, `user_id` or `city`)
-and return the saved `Address`:
+**`GET /addresses`** returns `Address[]` (default first). **`POST /addresses`** and
+**`PATCH /addresses/:id`** accept the body below (no `id`, `user_id`, `city` or `distance_km`)
+and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and `distance_km`:
 
 ```json
 {
   "label": "Home",
   "receiver_name": "Tushar Kulange",
   "receiver_phone": "9876543210",
-  "line1": "Flat 12, Sai Residency",
-  "line2": "Kothrud",
-  "landmark": "Karishma Society",
-  "pincode": "411038",
+  "line1": "Plot 12, Sai Residency",
+  "line2": "Ekta Nagar, Chandanzira",
+  "landmark": "Panchamukhi Nagar",
+  "pincode": "431203",
+  "latitude": 19.8605,
+  "longitude": 75.8558,
   "is_default": true
 }
 ```
 
 - `label`: `"Home"` | `"Work"` | `"Other"`
-- `city` is always `"Pune"` (the only service city). The server sets it.
-- Exactly **one** address per user should have `is_default: true`.
+- `latitude` / `longitude`: the phone's GPS position at the address. Must be within **3 km** of the
+  hotel (Chandanzira, 19.856833, 75.851944), else `422 OUT_OF_DELIVERY_AREA`.
+- `city` is always `"Jalna"` (set by the server); `pincode` must be `431xxx`.
+- At most **5** addresses per user. Exactly **one** has `is_default: true`; the server keeps it that way.
 
 ---
 
@@ -371,7 +384,8 @@ and return the saved `Address`:
 | Delivery fee / GST | ₹30 flat / 5% | `src/utils/pricing.ts` |
 | Max quantity per add | 20 | `ProductCard.tsx`, `ProductDetailSheet.tsx` |
 | Cooking note | max 120 characters | `SpiceLevelSheet.tsx` |
-| Service area | Pune only | `src/types/index.ts` (`ServiceCity`) |
+| Service area | Within 3 km (straight line) of the hotel, Chandanzira, Jalna | `src/constants/shop.ts`, enforced by `backend/src/addresses.py` |
+| Saved addresses | Max 5 per user, exactly one default | enforced by `backend/src/addresses.py` |
 
 Menu prices come from `GET /products` (seeded from `backend/terraform/menu_seed.tf`; the seed
 prices are still placeholders).
