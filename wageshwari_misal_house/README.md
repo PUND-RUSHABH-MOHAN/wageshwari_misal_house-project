@@ -117,7 +117,48 @@ npx expo start --clear     # scan the QR with Expo Go, or press "a" for the Andr
 
 Change the API URL in `.env` (and `eas.json` for cloud builds), then restart with `--clear`.
 
-### 4.3 Endpoint map (planned endpoints, as named in the code comments)
+### 4.3 Google Maps (address pin + hotel map)
+
+- **Address form → Pin on map**: a full-screen map with the 3 km delivery circle around the hotel.
+  The pin stays in the middle and the customer moves the map under it; *Confirm* only works inside
+  the circle. *Use my current location* still works as before.
+- **Account → Visit us**: a small map of the hotel and the delivery area, plus **Directions**
+  (a plain Google Maps link: no API key, opens the Google Maps app).
+
+Code: `src/components/maps/*.native.tsx` (phones) with empty `*.tsx` twins for web, where
+`react-native-maps` (1.29.11, the SDK 58 version) doesn't exist; `src/utils/maps.ts`; `app.config.ts`.
+
+**The Android key is not in Git.** `app.config.ts` reads `GOOGLE_MAPS_ANDROID_API_KEY` and writes it
+into `AndroidManifest.xml` only; it is not copied into the public app config. Without a key the
+app still works and the map buttons are hidden in standalone Android builds. Cost: Google lists
+the mobile Maps SDK with unlimited free usage; Google still requires a billing account.
+
+One-time setup in Google Cloud (console.cloud.google.com):
+
+1. Create a project, attach a billing account.
+2. *APIs & Services → Library* → enable **Maps SDK for Android**.
+3. *APIs & Services → Credentials → Create credentials → API key*. Edit the key:
+   - *Application restrictions* → **Android apps** → add package `com.wagheshwar.misalhouse` with the
+     **SHA-1** of the app's signing certificate. Get it with
+     `npx eas-cli@latest credentials -p android` (pick the build profile, read "SHA1 Fingerprint").
+     When the app goes to the Play Store (part 10), also add Google Play's app-signing SHA-1.
+   - *API restrictions* → **Restrict key** → only **Maps SDK for Android**.
+4. Put the key where builds can read it (never in Git, never in chat):
+
+   ```powershell
+   # local builds (file is git-ignored via .env*.local)
+   Set-Content -Path .env.local -Value "GOOGLE_MAPS_ANDROID_API_KEY=<your key>"
+   # EAS cloud builds (preview + production profiles read these environments)
+   npx eas-cli@latest env:create --name GOOGLE_MAPS_ANDROID_API_KEY --value "<your key>" --environment preview --environment production --visibility sensitive
+   ```
+
+**Testing maps:** the key is locked to this app, so it can't work inside Expo Go (a different
+app). Expo Go may still show a map using its own setup, or a blank grey map. Test maps in a
+preview build: `npx eas-cli@latest build -p android --profile preview`, then install the APK.
+A blank grey map in that build means the key is missing, restricted to the wrong package/SHA-1,
+or *Maps SDK for Android* isn't enabled.
+
+### 4.4 Endpoint map (planned endpoints, as named in the code comments)
 
 | Screen | Action in code | Endpoint | Code location |
 |---|---|---|---|
