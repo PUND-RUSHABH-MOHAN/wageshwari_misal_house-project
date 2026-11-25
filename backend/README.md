@@ -8,7 +8,7 @@ Status:
 - **Part 3, menu + photos**: deployed 2026-11-24. API `https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com`, photos `https://d2n5hm5b49hk3p.cloudfront.net`.
 - **Part 4, saved addresses**: 3 km GPS delivery area around the hotel (19.856833, 75.851944).
 - **Part 5, orders**: deployed 2026-11-25. Place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
-- **Part 6, kitchen + menu admin**: order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
+- **Part 6, kitchen + menu admin**: deployed 2026-11-25. Order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
 
 ```
 backend/
@@ -275,8 +275,12 @@ covers 1 TB of transfer a month; the photos in S3 cost paise.
 
 ## Make someone an admin
 
-Admins are the members of the Cognito group `admin`. Add an account (it must already be signed up
-and confirmed), from PowerShell:
+Admins are the members of the Cognito group `admin`. The account must first **sign up in the app**
+and confirm its email. Don't create it with "Create user" in the console: that gives it a temporary
+password that must be changed at first login, which the app can't do (login answers `CHALLENGE_REQUIRED`).
+
+In the AWS console: Cognito → User pools → `wmh-users` → **Groups** → `admin` → **Add user to group**
+→ pick the account. Or from PowerShell:
 
 ```powershell
 aws cognito-idp admin-add-user-to-group --user-pool-id ap-south-1_Szcz11NPr --username owner@example.com --group-name admin --profile wmh --region ap-south-1
