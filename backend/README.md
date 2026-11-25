@@ -7,7 +7,7 @@ Status:
 - **Part 1, auth**: deployed 2026-11-18.
 - **Part 3, menu + photos**: deployed 2026-11-24. API `https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com`, photos `https://d2n5hm5b49hk3p.cloudfront.net`.
 - **Part 4, saved addresses**: 3 km GPS delivery area around the hotel (19.856833, 75.851944).
-- **Part 5, orders**: place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
+- **Part 5, orders**: deployed 2026-11-25. Place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
 
 ```
 backend/
