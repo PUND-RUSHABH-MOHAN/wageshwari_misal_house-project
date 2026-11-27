@@ -10,7 +10,7 @@ Status:
 - **Part 5, orders**: deployed 2026-11-25. Place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
 - **Part 7, direct UPI payments** (no gateway), deployed 2026-11-27: UPI link + QR to the hotel's UPI ID, customer sends the UTR, the kitchen confirms "Payment received"; unpaid orders auto-cancel after 30 minutes.
 - **Part 6, kitchen + menu admin**: deployed 2026-11-25. Order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
-- **Part 7b, hours + store switch**: online delivery 9 AM – 9 PM in 12 one-hour slots; admins can stop all new online orders (Kitchen tab) until they switch them back on. *Planned, not applied yet.*
+- **Part 7b, hours + store switch**: online delivery 9 AM – 9 PM in 12 one-hour slots; admins can stop all new online orders (Kitchen tab) until they switch them back on. Deployed 2026-11-27.
 
 ```
 backend/
@@ -38,7 +38,7 @@ backend/
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (89 resources)
+## What gets created (91 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
