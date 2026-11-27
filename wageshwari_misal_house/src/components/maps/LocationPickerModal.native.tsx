@@ -1,7 +1,7 @@
 import * as Location from 'expo-location';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
-import MapView, { Circle, Marker, PROVIDER_GOOGLE, type Region } from 'react-native-maps';
+import MapView, { Circle, Marker, PROVIDER_GOOGLE, type Details, type Region } from 'react-native-maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Icon } from '@/components/Icon';
@@ -16,11 +16,17 @@ import type { LocationPickerProps } from './LocationPickerModal';
 const SHOP_COORDS = { latitude: SHOP.latitude, longitude: SHOP.longitude };
 const STREET_ZOOM = { latitudeDelta: 0.008, longitudeDelta: 0.008 }; // ~900 m across
 const AREA_ZOOM = { latitudeDelta: 0.07, longitudeDelta: 0.07 }; // whole 3 km circle
+/** If the map hasn't drawn by then, say so (bad/missing Maps key, no internet). */
+const MAP_LOAD_TIMEOUT_MS = 10000;
 
 /**
  * Full-screen map to place the delivery pin. The pin is fixed in the middle of the screen and
  * the customer moves the map under it (the usual food-app pattern; no dragging a tiny marker).
  * The shaded circle is the delivery area; Confirm is disabled outside it.
+ *
+ * Confirm also needs a real choice: the map moved by the customer, "My location", or an
+ * existing pin. Otherwise a map that never loaded would quietly save the hotel's own position.
+ * Remount per opening (key) so each opening starts fresh.
  */
 export function LocationPickerModal({ visible, initial, onClose, onConfirm }: LocationPickerProps) {
   const insets = useSafeAreaInsets();
@@ -29,6 +35,16 @@ export function LocationPickerModal({ visible, initial, onClose, onConfirm }: Lo
   const [center, setCenter] = useState<Coords>(start);
   const [locating, setLocating] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  /** True once the customer has placed the pin (moved the map / My location) or had one already. */
+  const [pinned, setPinned] = useState(initial !== null && initial !== undefined);
+  const [mapLoaded, setMapLoaded] = useState(false);
+  const [mapSlow, setMapSlow] = useState(false);
+
+  useEffect(() => {
+    if (!visible || mapLoaded) return;
+    const timer = setTimeout(() => setMapSlow(true), MAP_LOAD_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [visible, mapLoaded]);
 
   const km = distanceFromShopKm(center.latitude, center.longitude);
   const inside = km <= SHOP.deliveryRadiusKm;
@@ -36,6 +52,12 @@ export function LocationPickerModal({ visible, initial, onClose, onConfirm }: Lo
   const goTo = (coords: Coords, zoom = STREET_ZOOM) => {
     mapRef.current?.animateToRegion({ ...coords, ...zoom }, 600);
     setCenter(coords);
+  };
+
+  const onRegionChangeComplete = (r: Region, details?: Details) => {
+    setCenter({ latitude: r.latitude, longitude: r.longitude });
+    // Google Maps tells gestures apart from animations; Apple Maps doesn't, so any move counts there.
+    if (Platform.OS !== 'android' || details?.isGesture) setPinned(true);
   };
 
   const goToMyLocation = async (askPermission: boolean) => {
@@ -51,6 +73,7 @@ export function LocationPickerModal({ visible, initial, onClose, onConfirm }: Lo
       setLocating(true);
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
       goTo({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+      setPinned(true);
     } catch {
       if (askPermission) setNote("Couldn't get your location. Move the map to your address instead.");
     } finally {
@@ -66,7 +89,11 @@ export function LocationPickerModal({ visible, initial, onClose, onConfirm }: Lo
           style={StyleSheet.absoluteFill}
           provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
           initialRegion={{ ...start, ...(initial ? STREET_ZOOM : AREA_ZOOM) }}
-          onRegionChangeComplete={(r: Region) => setCenter({ latitude: r.latitude, longitude: r.longitude })}
+          onRegionChangeComplete={onRegionChangeComplete}
+          onMapLoaded={() => {
+            setMapLoaded(true);
+            setMapSlow(false);
+          }}
           // New address: once the map is up, jump to where the phone is (only if location is already allowed).
           onMapReady={() => {
             if (!initial) goToMyLocation(false);
@@ -116,17 +143,33 @@ export function LocationPickerModal({ visible, initial, onClose, onConfirm }: Lo
             <Text style={styles.myLocationText}>{locating ? 'Finding you…' : 'My location'}</Text>
           </Pressable>
 
-          <View style={[styles.status, inside ? styles.statusOk : styles.statusBad]}>
-            <Icon name={inside ? 'checkCircle' : 'info'} size={18} color={inside ? Colors.success : Colors.danger} />
-            <Text style={[styles.statusText, { color: inside ? Colors.success : Colors.danger }]}>
-              {inside
-                ? `${formatKm(km)} from the hotel · we deliver here`
-                : `${formatKm(km)} from the hotel · outside our ${SHOP.deliveryRadiusKm} km delivery area`}
-            </Text>
-          </View>
+          {mapSlow && !mapLoaded ? (
+            <View style={[styles.status, styles.statusBad]}>
+              <Icon name="info" size={18} color={Colors.danger} />
+              <Text style={[styles.statusText, { color: Colors.danger }]}>
+                The map didn&apos;t load. Tap My location, or close this and use your current location.
+              </Text>
+            </View>
+          ) : !pinned ? (
+            <View style={[styles.status, styles.statusHint]}>
+              <Icon name="info" size={18} color={Colors.textMuted} />
+              <Text style={[styles.statusText, { color: Colors.textMuted }]}>
+                Move the map to your door, or tap My location.
+              </Text>
+            </View>
+          ) : (
+            <View style={[styles.status, inside ? styles.statusOk : styles.statusBad]}>
+              <Icon name={inside ? 'checkCircle' : 'info'} size={18} color={inside ? Colors.success : Colors.danger} />
+              <Text style={[styles.statusText, { color: inside ? Colors.success : Colors.danger }]}>
+                {inside
+                  ? `${formatKm(km)} from the hotel · we deliver here`
+                  : `${formatKm(km)} from the hotel · outside our ${SHOP.deliveryRadiusKm} km delivery area`}
+              </Text>
+            </View>
+          )}
           {note ? <Text style={styles.note}>{note}</Text> : null}
 
-          <Button title="Confirm location" onPress={() => onConfirm(center)} disabled={!inside} />
+          <Button title="Confirm location" onPress={() => onConfirm(center)} disabled={!pinned || !inside} />
           <Pressable onPress={() => goTo(SHOP_COORDS, AREA_ZOOM)} hitSlop={8}>
             <Text style={styles.link}>Show the whole delivery area</Text>
           </Pressable>
@@ -207,6 +250,7 @@ const styles = StyleSheet.create({
   },
   statusOk: { backgroundColor: Colors.successSoft, borderColor: '#B7DDBE' },
   statusBad: { backgroundColor: Colors.dangerSoft, borderColor: '#F3B9B9' },
+  statusHint: { backgroundColor: Colors.surface, borderColor: Colors.border },
   statusText: { flex: 1, fontFamily: Fonts.medium, fontSize: 13.5, lineHeight: 19 },
   note: { fontFamily: Fonts.regular, fontSize: 13, color: Colors.textMuted },
   link: { fontFamily: Fonts.semibold, fontSize: 14, color: Colors.primary, textAlign: 'center' },
