@@ -10,6 +10,7 @@ Status:
 - **Part 5, orders**: deployed 2026-11-25. Place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
 - **Part 7, direct UPI payments** (no gateway), deployed 2026-11-27: UPI link + QR to the hotel's UPI ID, customer sends the UTR, the kitchen confirms "Payment received"; unpaid orders auto-cancel after 30 minutes.
 - **Part 6, kitchen + menu admin**: deployed 2026-11-25. Order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
+- **Part 7b, hours + store switch**: online delivery 9 AM – 9 PM in 12 one-hour slots; admins can stop all new online orders (Kitchen tab) until they switch them back on. *Planned, not applied yet.*
 
 ```
 backend/
@@ -18,9 +19,10 @@ backend/
 │   ├── users.py             profile item in DynamoDB
 │   ├── auth.py              /auth/* routes
 │   ├── me.py                /me routes
-│   ├── catalog.py           /categories, /products (the menu)
+│   ├── catalog.py           /categories, /products (the menu), /store (open or not)
 │   ├── addresses.py         /addresses (saved delivery addresses, 3 km check)
 │   ├── orders.py            /orders (place, list, view, cancel)
+│   ├── store.py             online-orders switch + delivery hours (used by catalog, orders, admin)
 │   ├── admin.py             /admin/* (kitchen order board, status moves, menu editing)
 │   └── expire.py            scheduled: cancels unpaid UPI orders (EventBridge Scheduler)
 ├── tests/                   pytest + moto (no AWS account touched)
@@ -31,7 +33,8 @@ backend/
 │   ├── verify-addresses.ps1    check of the addresses API with a real account
 │   ├── verify-orders.ps1       places one real order for tomorrow, then cancels it
 │   ├── verify-admin.ps1        kitchen + menu admin checks with an admin account
-│   └── verify-payments.ps1     UPI payment flow with an admin account (no real money)
+│   ├── verify-payments.ps1     UPI payment flow with an admin account (no real money)
+│   └── verify-store.ps1        store switch: stops online orders for a few seconds, then re-opens
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
@@ -42,7 +45,7 @@ backend/
 | Cognito User Pool | `wmh-users` | The user directory. Stores emails and password hashes, emails the confirmation and reset codes, issues JWTs. |
 | Cognito app client | `wmh-app` | How the mobile app identifies itself to the pool. Public (no secret), because anything in an APK can be extracted. |
 | Cognito group | `admin` | Members get `role: "admin"`: the Kitchen tab and Manage menu in the app, and the `/admin/*` routes. Added by hand (see "Make someone an admin"), so no email is in the repo. |
-| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to) and `UTR#<utr>` (which order a UPI reference was used for). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
+| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to) `UTR#<utr>` (which order a UPI reference was used for) and `SETTINGS`/`STORE` (the online-orders switch). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
 | Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
 | IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query/delete items in `wmh-main`. Nothing else. |
 | Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders`, `wmh-admin`, `wmh-expire` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`; orders/admin/expire get `UPI_ID`, `UPI_PAYEE_NAME`, `PAYMENT_WINDOW_MINUTES`. |
@@ -71,6 +74,7 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `PATCH /me` | JWT | `{name?, phone?}` | `200 User` |
 | `GET /categories` | – | – | `200 Category[]`: active only, by `sort_order` |
 | `GET /products` | – | – | `200 Product[]`: sold-out ones included (`is_available: false`) |
+| `GET /store` | – | – | `200 {accepting_orders, message, opens_at: "09:00", closes_at: "21:00"}` (not cached) |
 | `GET /addresses` | JWT | – | `200 Address[]`: default first, then oldest first |
 | `POST /addresses` | JWT | `{label, receiver_name, receiver_phone, line1, line2?, landmark?, pincode, latitude, longitude, is_default?}` | `201 Address` |
 | `PATCH /addresses/{id}` | JWT | any of the POST fields (`latitude` + `longitude` together) | `200 Address` |
@@ -88,6 +92,7 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `GET /admin/products` | JWT + admin | – | `200 AdminProduct[]`, hidden ones included |
 | `POST /admin/products` | JWT + admin | `{category_id, name, price, name_mr?, description?, image_url?, is_veg?, has_spice_level?, is_available?, is_active?}` | `201 AdminProduct` |
 | `PATCH /admin/products/{id}` | JWT + admin | any of the POST fields | `200 AdminProduct` |
+| `PATCH /admin/store` | JWT + admin | `{accepting_orders: bool, message?}` (message ≤ 120 chars) | `200 {…StoreStatus, updated_at, updated_by}` |
 
 Menu responses carry `Cache-Control: public, max-age=60`, so menu edits show up within a minute.
 
@@ -113,8 +118,12 @@ Order rules (all enforced by the server; the app shows the same ones):
   Change `min_order_paise` in `terraform/variables.tf` (and `MIN_ORDER_PAISE` in the app's `pricing.ts`).
 - **Payment**: `cod` starts `CONFIRMED`, `payment_status: "pending"` (paid on delivery). `online` = direct UPI
   (Part 7, below); if no UPI ID is configured it's `400 PAYMENT_METHOD_UNAVAILABLE`.
+- **Delivery hours 9 AM – 9 PM**, 12 one-hour slots (`SLOTS` in `orders.py`, `slot_09` … `slot_20`):
+  Morning 9–10, 10–11, 11–12 · Afternoon 12–1 … 4–5 · Evening 5–6 … 8–9. `slot_label` must be one of these
+  labels exactly, e.g. `"Morning 9:00 - 10:00 AM"`, `"Afternoon 12:00 - 1:00 PM"`, `"Evening 8:00 - 9:00 PM"`.
 - **Dates in India time** (IST, fixed +05:30): today or tomorrow only; a slot for today closes 30 minutes
-  before it starts → `409 SLOT_UNAVAILABLE`. `slot_label` must be one of the app's five labels exactly.
+  before it starts → `409 SLOT_UNAVAILABLE`.
+- **Online orders switched off** (store switch, below) → `409 STORE_CLOSED` with the hotel's message.
 - **Items**: 1–20 lines, quantity 1–20, `spice_level` only on dishes with spice levels, `note` ≤ 120 chars.
   Unknown or sold-out dish → `409 PRODUCT_UNAVAILABLE` (the app reloads the menu).
 - **Address** must be yours (`404`) and still inside the delivery area (`422 OUT_OF_DELIVERY_AREA`).
@@ -161,6 +170,16 @@ Admin rules (Part 6):
   New dishes use their category's photo until photo upload exists (Part 6b). There's no delete: hide instead.
 - Orders placed before Part 6 have no `ORDERREF` record, so the kitchen can't move them (`404`).
 
+Store switch (Part 7b):
+- One item, `PK = "SETTINGS"`, `SK = "STORE"`: `accepting_orders`, `message`, `updated_at`, `updated_by`.
+  No item = open.
+- `PATCH /admin/store {accepting_orders: false, message?}` stops **all** new online orders, for today and
+  tomorrow, until an admin sends `{accepting_orders: true}` (no automatic re-opening). Re-opening clears the message.
+- While closed, `POST /orders` → `409 STORE_CLOSED` (message = the hotel's, or a default). Orders already placed
+  are untouched: the kitchen keeps working them, customers can still pay, cancel and see their status.
+  A retry of an order placed *before* closing (same `Idempotency-Key`) still returns that order.
+- `GET /store` is public and sent with `Cache-Control: no-store`, so phones see a change at once.
+
 Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PASSWORD`,
 `EMAIL_TAKEN` (409), `USER_NOT_CONFIRMED` (403 → show the code screen), `INVALID_CODE`,
 `CODE_EXPIRED`, `ALREADY_CONFIRMED` (409), `INVALID_CREDENTIALS` (401),
@@ -169,7 +188,7 @@ Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PAS
 `BELOW_MINIMUM_ORDER` (422), `PAYMENT_METHOD_UNAVAILABLE`, `SLOT_UNAVAILABLE` (409),
 `PRODUCT_UNAVAILABLE` (409), `IDEMPOTENCY_CONFLICT` (409), `ORDER_NOT_CANCELLABLE` (409), `CONFLICT` (409),
 `FORBIDDEN` (403), `INVALID_STATUS_CHANGE` (409), `ORDER_CHANGED` (409),
-`UTR_ALREADY_USED` (409), `ORDER_NOT_PAYABLE` (409),
+`UTR_ALREADY_USED` (409), `ORDER_NOT_PAYABLE` (409), `STORE_CLOSED` (409),
 `EMAIL_DELIVERY_FAILED` (502), `EMAIL_CHANGE_NOT_SUPPORTED`, `CHALLENGE_REQUIRED`,
 `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`.
 
@@ -235,7 +254,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-234 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
+250 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
 with mocks, and `verify-auth.ps1` checks them for real.
 
 ## Verify after deploy
@@ -283,6 +302,12 @@ UPI payments (no real money; uses an admin account as both customer and kitchen,
 
 ```powershell
 .\backend\scripts\verify-payments.ps1 -Email owner@example.com
+```
+
+Store switch (uses an admin account; online orders are off for about 2 seconds, then back on):
+
+```powershell
+.\backend\scripts\verify-store.ps1 -Email owner@example.com -CustomerEmail you+wmh1@gmail.com
 ```
 
 If PowerShell blocks a script: `Set-ExecutionPolicy -Scope Process Bypass`.
@@ -338,6 +363,12 @@ upi_id = "yourbusiness@okaxis"
 
 Change that file, plan, apply. Only `wmh-orders`, `wmh-admin` and `wmh-expire` are updated; orders still
 waiting for payment show the new ID straight away. To switch UPI checkout off, set `upi_id = ""`.
+
+## Stop online orders (hotel closed)
+
+In the app: **Kitchen** tab → switch **Taking online orders** off → optionally pick or type a message for
+customers → **Stop online orders**. Switch it back on to re-open; it never re-opens by itself.
+Customers see a red banner on Home and in the Cart, and Place Order is disabled.
 
 ## Changing the menu
 

@@ -2,6 +2,17 @@
 
 locals {
   lambda_src_orders_9 = <<PYSRC
+                "SET #s = :cancelled, cancelled_at = :now, updated_at = :now, cancelled_by = :by, "
+                "status_history = list_append(if_not_exists(status_history, :empty), :entry)"
+            ),
+            # Not once the kitchen started, and not after a UPI payment was reported (needs a refund).
+            ConditionExpression="#s IN (:pending, :confirmed) AND attribute_not_exists(utr)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":cancelled": "CANCELLED",
+                ":now": now,
+                ":pending": CANCELLABLE[0],
+                ":confirmed": CANCELLABLE[1],
                 ":by": "customer",
                 ":empty": [],
                 ":entry": [history_entry("CANCELLED", now, "customer")],
@@ -51,23 +62,5 @@ def submit_payment(event: dict) -> dict:
         )
         raise ApiError(409, "ORDER_NOT_PAYABLE", message)
     if current.get("utr") == utr:
-        return response(200, to_order(current))  # sending the same UTR twice is harmless
-
-    now = _iso(_now_utc())
-    table = users.table()
-    steps = [
-        {   # claim the UTR for this order
-            "Put": {
-                "TableName": table.name,
-                "Item": {"PK": f"UTR#{utr}", "SK": "UTR", "entity": "UTR", "order_id": current["id"],
-                         "user_id": user_id, "created_at": now},
-                "ConditionExpression": "attribute_not_exists(PK)",
-            }
-        },
-        {
-            "Update": {
-                "TableName": table.name,
-                "Key": _key(user_id, f"ORDER#{current['id']}"),
-                "UpdateExpression": (
 PYSRC
 }

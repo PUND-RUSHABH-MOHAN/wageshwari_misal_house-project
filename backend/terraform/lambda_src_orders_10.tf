@@ -2,6 +2,24 @@
 
 locals {
   lambda_src_orders_10 = <<PYSRC
+        return response(200, to_order(current))  # sending the same UTR twice is harmless
+
+    now = _iso(_now_utc())
+    table = users.table()
+    steps = [
+        {   # claim the UTR for this order
+            "Put": {
+                "TableName": table.name,
+                "Item": {"PK": f"UTR#{utr}", "SK": "UTR", "entity": "UTR", "order_id": current["id"],
+                         "user_id": user_id, "created_at": now},
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }
+        },
+        {
+            "Update": {
+                "TableName": table.name,
+                "Key": _key(user_id, f"ORDER#{current['id']}"),
+                "UpdateExpression": (
                     "SET utr = :utr, payment_status = :submitted, payment_submitted_at = :now, updated_at = :now"
                 ),
                 "ConditionExpression": "#s = :pending AND payment_status <> :paid",

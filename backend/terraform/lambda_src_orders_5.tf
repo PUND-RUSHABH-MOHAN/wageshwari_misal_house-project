@@ -2,6 +2,16 @@
 
 locals {
   lambda_src_orders_5 = <<PYSRC
+# ---------------------------------------------------------------------------
+# Business rules
+# ---------------------------------------------------------------------------
+def _check_slot(delivery_date: str, slot_label: str, now: datetime) -> tuple[str, int]:
+    now_ist = now.astimezone(IST)
+    today = now_ist.date()
+    day = date.fromisoformat(delivery_date)
+    if day not in (today, today + timedelta(days=1)):
+        raise ApiError(409, "SLOT_UNAVAILABLE", "Delivery can be booked for today or tomorrow only.")
+    slot_id, start_hour = SLOTS_BY_LABEL[slot_label]
     if day == today and now_ist.hour * 60 + now_ist.minute >= start_hour * 60 - SLOT_CUTOFF_MINUTES:
         raise ApiError(
             409, "SLOT_UNAVAILABLE", "That delivery slot has closed for today. Please pick a later slot or tomorrow."
@@ -52,19 +62,5 @@ def _price_lines(order_id: str, lines: list[dict]) -> list[dict]:
                 "product_id": line["product_id"],
                 "product_name": name,
                 "unit_price": unit_price,
-                "quantity": line["quantity"],
-                **({"spice_level": line["spice_level"]} if "spice_level" in line else {}),
-                **({"note": line["note"]} if "note" in line else {}),
-                "line_total": unit_price * line["quantity"],
-            }
-        )
-    return priced
-
-
-def _next_order_number(now: datetime) -> str:
-    day = now.astimezone(IST).strftime("%Y%m%d")
-    seq = users.table().update_item(
-        Key={"PK": "COUNTER", "SK": f"ORDER#{day}"},
-        UpdateExpression="ADD seq :one",
 PYSRC
 }

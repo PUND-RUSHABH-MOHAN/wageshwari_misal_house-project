@@ -18,12 +18,23 @@ export function computeBill(cart: CartItem[]): BillBreakdown {
   return { subtotal, delivery_fee, tax, total: subtotal + delivery_fee + tax };
 }
 
+/**
+ * One-hour delivery slots, 9 AM – 9 PM IST. Mirrors SLOTS in backend/src/orders.py: the server
+ * accepts only these exact labels (`${name} ${time}`), so change both together.
+ */
 export const DELIVERY_SLOTS: DeliverySlot[] = [
-  { id: 'slot_early', name: 'Early Bird', time: '7:00 - 8:00 AM', start_hour: 7 },
-  { id: 'slot_morning', name: 'Morning', time: '8:00 - 9:00 AM', start_hour: 8 },
-  { id: 'slot_breakfast', name: 'Breakfast', time: '9:00 - 10:00 AM', start_hour: 9 },
-  { id: 'slot_brunch', name: 'Brunch', time: '10:00 - 11:00 AM', start_hour: 10 },
-  { id: 'slot_lunch', name: 'Lunch', time: '12:00 - 1:00 PM', start_hour: 12 },
+  { id: 'slot_09', name: 'Morning', time: '9:00 - 10:00 AM', start_hour: 9 },
+  { id: 'slot_10', name: 'Morning', time: '10:00 - 11:00 AM', start_hour: 10 },
+  { id: 'slot_11', name: 'Morning', time: '11:00 AM - 12:00 PM', start_hour: 11 },
+  { id: 'slot_12', name: 'Afternoon', time: '12:00 - 1:00 PM', start_hour: 12 },
+  { id: 'slot_13', name: 'Afternoon', time: '1:00 - 2:00 PM', start_hour: 13 },
+  { id: 'slot_14', name: 'Afternoon', time: '2:00 - 3:00 PM', start_hour: 14 },
+  { id: 'slot_15', name: 'Afternoon', time: '3:00 - 4:00 PM', start_hour: 15 },
+  { id: 'slot_16', name: 'Afternoon', time: '4:00 - 5:00 PM', start_hour: 16 },
+  { id: 'slot_17', name: 'Evening', time: '5:00 - 6:00 PM', start_hour: 17 },
+  { id: 'slot_18', name: 'Evening', time: '6:00 - 7:00 PM', start_hour: 18 },
+  { id: 'slot_19', name: 'Evening', time: '7:00 - 8:00 PM', start_hour: 19 },
+  { id: 'slot_20', name: 'Evening', time: '8:00 - 9:00 PM', start_hour: 20 },
 ];
 
 export const slotLabel = (slot: DeliverySlot) => `${slot.name} ${slot.time}`;
@@ -71,9 +82,9 @@ export function isSlotAvailable(slot: DeliverySlot, isToday: boolean, now: Date 
   return istMinutes(now) < slot.start_hour * 60 - 30;
 }
 
-/** Kitchen hours: 7:00 AM – 2:00 PM IST. */
-export const KITCHEN_OPEN_HOUR = 7;
-export const KITCHEN_CLOSE_HOUR = 14;
+/** Online delivery hours: 9:00 AM – 9:00 PM IST (store.py OPEN_HOUR / CLOSE_HOUR). */
+export const KITCHEN_OPEN_HOUR = 9;
+export const KITCHEN_CLOSE_HOUR = 21;
 
 export function isKitchenOpen(now: Date = new Date()): boolean {
   const h = Math.floor(istMinutes(now) / 60);

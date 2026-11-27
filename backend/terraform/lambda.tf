@@ -15,7 +15,7 @@ locals {
     }
     catalog = {
       handler = "catalog.handler"
-      files   = ["common.py", "catalog.py"]
+      files   = ["common.py", "users.py", "store.py", "catalog.py"]
     }
     addresses = {
       handler = "addresses.handler"
@@ -23,16 +23,16 @@ locals {
     }
     orders = {
       handler = "orders.handler"
-      files   = ["common.py", "users.py", "addresses.py", "orders.py"]
+      files   = ["common.py", "users.py", "store.py", "addresses.py", "orders.py"]
     }
     admin = {
       handler = "admin.handler"
-      files   = ["common.py", "users.py", "addresses.py", "orders.py", "catalog.py", "admin.py"]
+      files   = ["common.py", "users.py", "store.py", "addresses.py", "orders.py", "catalog.py", "admin.py"]
     }
     # Not behind the API: EventBridge Scheduler runs it every 10 minutes (scheduler.tf).
     expire = {
       handler = "expire.handler"
-      files   = ["common.py", "users.py", "addresses.py", "orders.py", "expire.py"]
+      files   = ["common.py", "users.py", "store.py", "addresses.py", "orders.py", "expire.py"]
     }
   }
 

@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
-import { router, useIsFocused } from 'expo-router';
+import { router, useFocusEffect, useIsFocused } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -22,12 +22,13 @@ import { ProductCard } from '@/components/ProductCard';
 import { ProductDetailSheet } from '@/components/ProductDetailSheet';
 import { SpiceLevelSheet } from '@/components/SpiceLevelSheet';
 import { Button } from '@/components/ui';
+import { SHOP } from '@/constants/shop';
 import { Colors, Fonts, InputStyles, Radius, Shadow, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 import { CATEGORY_IMAGES, LOGO } from '@/data/mock-data';
 import type { Category, ID, Product } from '@/types';
 import { formatCurrency } from '@/utils/format';
-import { isKitchenOpen, KITCHEN_OPEN_HOUR } from '@/utils/pricing';
+import { isKitchenOpen } from '@/utils/pricing';
 
 const ALL = 'all';
 
@@ -40,6 +41,9 @@ export default function HomeScreen() {
     catalogStatus,
     catalogError,
     reloadCatalog,
+    store,
+    storeOpen,
+    reloadStore,
     cart,
     cartCount,
     bill,
@@ -48,12 +52,20 @@ export default function HomeScreen() {
   } = useApp();
   const [refreshing, setRefreshing] = useState(false);
 
-  // Pull-to-refresh: GET /categories + GET /products again.
+  // Pull-to-refresh: GET /categories + GET /products + GET /store again.
   const onRefresh = async () => {
     setRefreshing(true);
-    await reloadCatalog();
+    await Promise.all([reloadCatalog(), reloadStore()]);
     setRefreshing(false);
   };
+
+  // Re-check the store switch each time Home comes into view.
+  useFocusEffect(
+    useCallback(() => {
+      reloadStore();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+  );
   const { width: screenWidth } = useWindowDimensions();
   const columns = screenWidth >= 1000 ? 4 : screenWidth >= 700 ? 3 : 2;
   const cardWidth = Math.floor((screenWidth - Spacing.lg * 2 - GRID_GAP * (columns - 1)) / columns);
@@ -171,11 +183,19 @@ export default function HomeScreen() {
         ))}
       </ScrollView>
 
-      {!open ? (
+      {!storeOpen ? (
+        // The hotel switched online orders off (Kitchen tab). Browsing still works.
+        <View style={[styles.closedNote, styles.storeClosed]}>
+          <Icon name="store" size={16} color={Colors.danger} />
+          <Text style={[styles.closedNoteText, styles.storeClosedText]}>
+            {store?.message || "We're not taking online orders right now."}
+          </Text>
+        </View>
+      ) : !open ? (
         <View style={styles.closedNote}>
           <Icon name="info" size={16} color={Colors.warning} />
           <Text style={styles.closedNoteText}>
-            Kitchen opens at {KITCHEN_OPEN_HOUR} AM — you can pre-order for the next slot.
+            We deliver {SHOP.hours} — you can pre-order for the next slot.
           </Text>
         </View>
       ) : null}
@@ -443,6 +463,8 @@ const styles = StyleSheet.create({
     marginTop: Spacing.lg,
   },
   closedNoteText: { flex: 1, fontFamily: Fonts.medium, fontSize: 13, color: Colors.warning },
+  storeClosed: { backgroundColor: Colors.dangerSoft },
+  storeClosedText: { color: Colors.danger },
 
   listHead: {
     flexDirection: 'row',

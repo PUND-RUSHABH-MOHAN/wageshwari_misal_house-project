@@ -2,14 +2,21 @@
 
 locals {
   lambda_src_catalog_2 = <<PYSRC
+def get_products(event: dict) -> dict:  # noqa: ARG001 - route signature
     products = [to_product(i) for i in _query("PRODUCT#") if i.get("is_active", True)]
     products.sort(key=lambda p: (p["category_id"], p["name"]))
     return response(200, products, CACHE_HEADERS)
 
 
+def get_store(event: dict) -> dict:  # noqa: ARG001 - route signature
+    # Not cached: when the hotel switches orders off, phones should see it at once.
+    return response(200, store.to_store(store.get_settings()), {"Cache-Control": "no-store"})
+
+
 ROUTES = {
     "GET /categories": get_categories,
     "GET /products": get_products,
+    "GET /store": get_store,
 }
 
 

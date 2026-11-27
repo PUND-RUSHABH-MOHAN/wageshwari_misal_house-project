@@ -61,7 +61,7 @@ function New-Key { return "verify-" + [Guid]::NewGuid().ToString("N") }
 $istNow = [DateTime]::UtcNow.AddHours(5.5)
 $today = $istNow.ToString("yyyy-MM-dd")
 $tomorrow = $istNow.AddDays(1).ToString("yyyy-MM-dd")
-$morning = "Morning 8:00 - 9:00 AM"
+$morning = "Morning 9:00 - 10:00 AM"  # first slot (part 7b: 1-hour slots, 9 AM - 9 PM)
 
 $secure = Read-Host "Password for $Email" -AsSecureString
 $password = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
@@ -107,13 +107,11 @@ try {
   if ($plain.price -lt 10000) {
     Check "below Rs 100 minimum is refused" (Invoke-Api POST "/orders" $small -Token $t -Key (New-Key)) 422 "BELOW_MINIMUM_ORDER"
   }
-  $online = $body.Clone(); $online.payment_method = "online"
-  Check "online payment refused (COD only for now)" (Invoke-Api POST "/orders" $online -Token $t -Key (New-Key)) 400 "PAYMENT_METHOD_UNAVAILABLE"
   $later = $body.Clone(); $later.delivery_date = $istNow.AddDays(3).ToString("yyyy-MM-dd")
   Check "delivery in 3 days is refused" (Invoke-Api POST "/orders" $later -Token $t -Key (New-Key)) 409 "SLOT_UNAVAILABLE"
-  if ($istNow.Hour * 60 + $istNow.Minute -ge 7 * 60 + 30) {
+  if ($istNow.Hour * 60 + $istNow.Minute -ge 8 * 60 + 30) {
     $closed = $body.Clone(); $closed.delivery_date = $today
-    Check "today's Morning slot (closed at 7:30)" (Invoke-Api POST "/orders" $closed -Token $t -Key (New-Key)) 409 "SLOT_UNAVAILABLE"
+    Check "today's 9 AM slot (closed at 8:30)" (Invoke-Api POST "/orders" $closed -Token $t -Key (New-Key)) 409 "SLOT_UNAVAILABLE"
   }
   $bad = $body.Clone(); $bad.address_id = "adr_0000000000000000"
   Check "someone else's / unknown address is 404" (Invoke-Api POST "/orders" $bad -Token $t -Key (New-Key)) 404 "NOT_FOUND"
@@ -132,7 +130,7 @@ try {
     $again = Invoke-Api POST "/orders" $body -Token $t -Key $key
     Check "retry with same key returns same order" $again 201 -Extra $again.Body.order_number
     Assert "  ...and it's the same order id" ($again.Body.id -eq $order.id)
-    $changed = $body.Clone(); $changed.slot_label = "Lunch 12:00 - 1:00 PM"
+    $changed = $body.Clone(); $changed.slot_label = "Afternoon 12:00 - 1:00 PM"
     Check "same key, different order is refused" (Invoke-Api POST "/orders" $changed -Token $t -Key $key) 409 "IDEMPOTENCY_CONFLICT"
 
     $l = Invoke-Api GET "/orders" -Token $t

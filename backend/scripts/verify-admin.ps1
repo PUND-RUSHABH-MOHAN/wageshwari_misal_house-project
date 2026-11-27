@@ -123,7 +123,7 @@ try {
   $item = $menu | Sort-Object price | Select-Object -Last 1
   $qty = [int] [Math]::Max(1, [Math]::Ceiling(10000 / $item.price))
   $body = @{
-    address_id = $addressId; delivery_date = $tomorrow; slot_label = "Lunch 12:00 - 1:00 PM"; payment_method = "cod"
+    address_id = $addressId; delivery_date = $tomorrow; slot_label = "Afternoon 12:00 - 1:00 PM"; payment_method = "cod"
     items = @(@{ product_id = $item.id; quantity = $qty })
   }
   $o = Invoke-Api POST "/orders" $body -Token $t -Key ("verify-" + [Guid]::NewGuid().ToString("N"))

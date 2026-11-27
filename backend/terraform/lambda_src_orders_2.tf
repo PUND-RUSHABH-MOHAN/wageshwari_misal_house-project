@@ -2,6 +2,11 @@
 
 locals {
   lambda_src_orders_2 = <<PYSRC
+import addresses
+import store
+import users
+from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response
+
 IST = timezone(timedelta(hours=5, minutes=30))  # India has no daylight saving
 
 DELIVERY_FEE_PAISE = 3000
@@ -17,12 +22,21 @@ SLOT_CUTOFF_MINUTES = 30
 LIST_LIMIT = 50
 
 # Mirror of DELIVERY_SLOTS in the app (src/utils/pricing.ts); label = f"{name} {time}".
+# One-hour slots, 9:00 AM - 9:00 PM (owner, 2026-11-27). Orders placed with the old
+# 7 AM - 1 PM slots keep their stored label.
 SLOTS = [
-    ("slot_early", "Early Bird", "7:00 - 8:00 AM", 7),
-    ("slot_morning", "Morning", "8:00 - 9:00 AM", 8),
-    ("slot_breakfast", "Breakfast", "9:00 - 10:00 AM", 9),
-    ("slot_brunch", "Brunch", "10:00 - 11:00 AM", 10),
-    ("slot_lunch", "Lunch", "12:00 - 1:00 PM", 12),
+    ("slot_09", "Morning", "9:00 - 10:00 AM", 9),
+    ("slot_10", "Morning", "10:00 - 11:00 AM", 10),
+    ("slot_11", "Morning", "11:00 AM - 12:00 PM", 11),
+    ("slot_12", "Afternoon", "12:00 - 1:00 PM", 12),
+    ("slot_13", "Afternoon", "1:00 - 2:00 PM", 13),
+    ("slot_14", "Afternoon", "2:00 - 3:00 PM", 14),
+    ("slot_15", "Afternoon", "3:00 - 4:00 PM", 15),
+    ("slot_16", "Afternoon", "4:00 - 5:00 PM", 16),
+    ("slot_17", "Evening", "5:00 - 6:00 PM", 17),
+    ("slot_18", "Evening", "6:00 - 7:00 PM", 18),
+    ("slot_19", "Evening", "7:00 - 8:00 PM", 19),
+    ("slot_20", "Evening", "8:00 - 9:00 PM", 20),
 ]
 SLOTS_BY_LABEL = {f"{name} {span}": (slot_id, start) for slot_id, name, span, start in SLOTS}
 
@@ -69,20 +83,5 @@ def upi_payment(item: dict) -> dict | None:
     vpa, name = upi_settings()
     if (
         not vpa
-        or item.get("payment_method") != "online"
-        or item.get("status") != "PENDING_PAYMENT"
-        or item.get("payment_status") == "paid"
-    ):
-        return None
-    amount = amount_text(int(item["total"]))
-    number = item["order_number"]
-    # NPCI deep-link format; the same string is shown as a QR code in the app.
-    uri = (
-        f"upi://pay?pa={quote(vpa, safe='@.')}&pn={quote(name)}&am={amount}&cu=INR"
-        f"&tn={quote('Order ' + number)}&tr={quote(number)}"
-    )
-    return {"upi_id": vpa, "payee_name": name, "amount": amount, "note": f"Order {number}", "uri": uri}
-
-
 PYSRC
 }

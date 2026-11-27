@@ -2,6 +2,20 @@
 
 locals {
   lambda_src_orders_6 = <<PYSRC
+                "quantity": line["quantity"],
+                **({"spice_level": line["spice_level"]} if "spice_level" in line else {}),
+                **({"note": line["note"]} if "note" in line else {}),
+                "line_total": unit_price * line["quantity"],
+            }
+        )
+    return priced
+
+
+def _next_order_number(now: datetime) -> str:
+    day = now.astimezone(IST).strftime("%Y%m%d")
+    seq = users.table().update_item(
+        Key={"PK": "COUNTER", "SK": f"ORDER#{day}"},
+        UpdateExpression="ADD seq :one",
         ExpressionAttributeValues={":one": 1},
         ReturnValues="UPDATED_NEW",
     )["Attributes"]["seq"]
@@ -59,20 +73,5 @@ def _replay(user_id: str, record: dict, request_hash: str) -> dict:
 
 
 def _put_order_and_record(order: dict, record: dict, now: datetime) -> None:
-    """One transaction: the order, its ORDERREF pointer, and the idempotency record."""
-    # The resource's client converts plain Python values itself (no {"S": ...} wrapping).
-    client = users.table().meta.client
-    name = users.table().name
-    client.transact_write_items(
-        TransactItems=[
-            {
-                "Put": {
-                    "TableName": name,
-                    "Item": order,
-                    "ConditionExpression": "attribute_not_exists(PK)",
-                }
-            },
-            {
-                "Put": {
 PYSRC
 }

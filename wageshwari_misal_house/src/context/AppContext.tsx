@@ -9,12 +9,14 @@ import { AppState as RNAppState } from 'react-native';
 
 import {
   addressApi,
+  adminApi,
   authApi,
   catalogApi,
   errorMessage,
   isApiError,
   meApi,
   orderApi,
+  storeApi,
   type CodeDelivery,
   type MePatch,
   type PlaceOrderBody,
@@ -39,6 +41,7 @@ import type {
   PlaceOrderInput,
   Product,
   SpiceLevel,
+  StoreStatus,
   User,
 } from '@/types';
 import { computeBill } from '@/utils/pricing';
@@ -70,6 +73,8 @@ interface AppState {
   selectedAddressId: ID | null;
   /** Drives the "Order placed" banner on the Orders tab. */
   lastPlacedOrderId: ID | null;
+  /** GET /store: is the hotel taking online orders? null until the first answer. */
+  store: StoreStatus | null;
 }
 
 const initialState: AppState = {
@@ -89,6 +94,7 @@ const initialState: AppState = {
   ordersError: null,
   selectedAddressId: null,
   lastPlacedOrderId: null,
+  store: null,
 };
 
 export type CatalogStatus = 'loading' | 'ready' | 'error';
@@ -116,7 +122,8 @@ type Action =
   | { type: 'ADDRESSES_LOADING' }
   | { type: 'ADDRESSES_LOADED'; addresses: Address[]; select?: ID }
   | { type: 'ADDRESSES_FAILED'; message: string }
-  | { type: 'SELECT_ADDRESS'; id: ID };
+  | { type: 'SELECT_ADDRESS'; id: ID }
+  | { type: 'STORE_LOADED'; store: StoreStatus };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -301,6 +308,9 @@ function reducer(state: AppState, action: Action): AppState {
     case 'SELECT_ADDRESS':
       return { ...state, selectedAddressId: action.id };
 
+    case 'STORE_LOADED': // GET /store | PATCH /admin/store
+      return { ...state, store: action.store };
+
     default:
       return state;
   }
@@ -322,6 +332,14 @@ interface AppContextValue {
   catalogError: string | null;
   /** Re-fetch the menu (pull-to-refresh, Retry). Never throws. */
   reloadCatalog: () => Promise<void>;
+  /** GET /store. null until the first answer (treated as open; the server has the final say). */
+  store: StoreStatus | null;
+  /** False only when the hotel has switched online orders off. */
+  storeOpen: boolean;
+  /** Re-check GET /store (screen focus, pull-to-refresh). Never throws. */
+  reloadStore: () => Promise<void>;
+  /** Admin: PATCH /admin/store. Stop (false) or restart (true) online orders. Throws ApiError. */
+  setAcceptingOrders: (accepting: boolean, message?: string) => Promise<void>;
   addresses: Address[];
   addressesStatus: LoadStatus;
   addressesError: string | null;
@@ -402,8 +420,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // GET /store. Quiet: if it fails, keep the last answer (the server still refuses orders
+  // while closed, with 409 STORE_CLOSED).
+  const loadStore = async () => {
+    try {
+      dispatch({ type: 'STORE_LOADED', store: await storeApi.get() });
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     loadCatalog();
+    loadStore();
+    // Re-check the store switch whenever the app comes back to the foreground.
+    const sub = RNAppState.addEventListener('change', (next) => {
+      if (next === 'active') loadStore();
+    });
+    return () => sub.remove();
   }, []);
 
   // GET /addresses for the signed-in user. `select` picks an address for checkout afterwards.
@@ -525,6 +559,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     catalogStatus: state.catalogStatus,
     catalogError: state.catalogError,
     reloadCatalog: loadCatalog,
+    store: state.store,
+    storeOpen: state.store?.accepting_orders ?? true,
+    reloadStore: loadStore,
+    setAcceptingOrders: async (accepting, message) => {
+      const updated = await withAuth((t) => adminApi.setStore(t, accepting, message?.trim() || undefined));
+      dispatch({ type: 'STORE_LOADED', store: updated });
+    },
     addresses: userAddresses,
     addressesStatus: state.addressesStatus,
     addressesError: state.addressesError,
@@ -628,6 +669,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } catch (e) {
         // A dish went off the menu or sold out: refresh the menu so the cart shows it.
         if (isApiError(e) && e.code === 'PRODUCT_UNAVAILABLE') loadCatalog();
+        // The hotel stopped online orders meanwhile: show the closed banner.
+        if (isApiError(e) && e.code === 'STORE_CLOSED') loadStore();
         throw e;
       }
     },

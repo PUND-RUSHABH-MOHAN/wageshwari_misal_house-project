@@ -12,12 +12,14 @@ import type {
   AddressInput,
   AdminOrder,
   AdminProduct,
+  AdminStore,
   Category,
   Order,
   OrderStatus,
   PlaceOrderInput,
   Product,
   SpiceLevel,
+  StoreStatus,
   User,
 } from '@/types';
 
@@ -174,6 +176,11 @@ export const catalogApi = {
   products: () => request<Product[]>('GET', '/products'),
 };
 
+/** Public: is the hotel taking online orders right now? (part 7b) */
+export const storeApi = {
+  get: () => request<StoreStatus>('GET', '/store'),
+};
+
 /** Body for POST / PATCH /addresses: the form fields, without the client-only `id`. */
 export type AddressPayload = Omit<AddressInput, 'id'>;
 
@@ -258,4 +265,10 @@ export const adminApi = {
     request<AdminProduct>('POST', '/admin/products', { token, body }),
   updateProduct: (token: string, id: string, body: ProductInput) =>
     request<AdminProduct>('PATCH', `/admin/products/${encodeURIComponent(id)}`, { token, body }),
+  /** Stop (false) or restart (true) online orders; `message` is shown to customers while closed. */
+  setStore: (token: string, accepting_orders: boolean, message?: string) =>
+    request<AdminStore>('PATCH', '/admin/store', {
+      token,
+      body: message ? { accepting_orders, message } : { accepting_orders },
+    }),
 };

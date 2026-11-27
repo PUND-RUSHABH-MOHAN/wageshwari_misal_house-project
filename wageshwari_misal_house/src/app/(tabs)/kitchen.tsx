@@ -2,6 +2,7 @@
  * Kitchen board (admins only; the tab is hidden for customers and the server answers 403).
  * GET /admin/orders for today or tomorrow, grouped by delivery slot; one tap moves an order
  * to its next step (POST /admin/orders/:id/status). Re-checks every 20 s while open.
+ * The "Online orders" switch at the top stops / restarts new orders (PATCH /admin/store).
  */
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
@@ -13,6 +14,7 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -20,6 +22,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { KitchenCancelSheet } from '@/components/KitchenCancelSheet';
 import { isKitchenDone, KitchenOrderCard } from '@/components/KitchenOrderCard';
+import { StopOrdersSheet } from '@/components/StopOrdersSheet';
 import { Button, EmptyState, Pill } from '@/components/ui';
 import { HOME_HREF } from '@/constants/routes';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
@@ -35,7 +38,9 @@ const POLL_MS = 20000;
 type Day = 'today' | 'tomorrow';
 
 export default function KitchenScreen() {
-  const { isAdmin } = useApp();
+  const { isAdmin, store, storeOpen, reloadStore, setAcceptingOrders } = useApp();
+  const [stopOpen, setStopOpen] = useState(false);
+  const [reopening, setReopening] = useState(false);
   const [day, setDay] = useState<Day>('today');
   const date = istDate(new Date(), day === 'today' ? 0 : 1);
 
@@ -69,12 +74,46 @@ export default function KitchenScreen() {
     useCallback(() => {
       if (!isAdmin) return;
       load();
+      reloadStore();
       const timer = setInterval(() => {
         if (AppState.currentState === 'active') load();
       }, POLL_MS);
       return () => clearInterval(timer);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isAdmin, load]),
   );
+
+  const onToggleStore = (next: boolean) => {
+    if (!next) {
+      setStopOpen(true); // asks for an optional message first
+      return;
+    }
+    Alert.alert('Start taking online orders?', 'Customers can place orders again straight away.', [
+      { text: 'Not yet', style: 'cancel' },
+      {
+        text: 'Start orders',
+        onPress: async () => {
+          setReopening(true);
+          try {
+            await setAcceptingOrders(true);
+          } catch (e) {
+            Alert.alert("Couldn't re-open orders", errorMessage(e));
+          } finally {
+            setReopening(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  const stopOrders = async (message: string) => {
+    try {
+      await setAcceptingOrders(false, message);
+      setStopOpen(false);
+    } catch (e) {
+      throw new Error(errorMessage(e));
+    }
+  };
 
   const switchDay = (next: Day) => {
     if (next === day) return;
@@ -169,6 +208,26 @@ export default function KitchenScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>Kitchen</Text>
         <Text style={styles.subtitle}>{formatDeliveryDate(date)}</Text>
+        <View style={[styles.storeRow, !storeOpen && styles.storeRowClosed]}>
+          <View style={styles.flex}>
+            <Text style={[styles.storeTitle, !storeOpen && styles.storeTitleClosed]}>
+              {storeOpen ? 'Taking online orders' : 'Online orders stopped'}
+            </Text>
+            <Text style={styles.storeHint} numberOfLines={2}>
+              {storeOpen ? 'Turn off when the hotel is closed.' : store?.message || 'Turn on to re-open.'}
+            </Text>
+          </View>
+          {reopening ? (
+            <ActivityIndicator color={Colors.primary} />
+          ) : (
+            <Switch
+              value={storeOpen}
+              onValueChange={onToggleStore}
+              trackColor={{ true: Colors.success, false: Colors.danger }}
+              accessibilityLabel="Taking online orders"
+            />
+          )}
+        </View>
         <View style={styles.dayRow}>
           <Pill label="Today" selected={day === 'today'} onPress={() => switchDay('today')} style={styles.flex} />
           <Pill
@@ -242,6 +301,12 @@ export default function KitchenScreen() {
         )}
       </ScrollView>
 
+      <StopOrdersSheet
+        key={stopOpen ? 'stop-open' : 'stop-closed'}
+        visible={stopOpen}
+        onClose={() => setStopOpen(false)}
+        onConfirm={stopOrders}
+      />
       <KitchenCancelSheet
         key={cancelTarget?.id ?? 'none'}
         order={cancelTarget}
@@ -268,6 +333,19 @@ const styles = StyleSheet.create({
   title: { fontFamily: Fonts.extrabold, fontSize: 26, lineHeight: 34, color: Colors.text },
   subtitle: { fontSize: 13, color: Colors.textMuted, marginTop: -Spacing.sm },
   dayRow: { flexDirection: 'row', gap: Spacing.sm },
+  storeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    backgroundColor: Colors.successSoft,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+  },
+  storeRowClosed: { backgroundColor: Colors.dangerSoft },
+  storeTitle: { fontSize: 14, fontWeight: '800', color: Colors.success },
+  storeTitleClosed: { color: Colors.danger },
+  storeHint: { fontSize: 12, color: Colors.textMuted, marginTop: 2 },
   counts: {
     flexDirection: 'row',
     backgroundColor: Colors.surface,

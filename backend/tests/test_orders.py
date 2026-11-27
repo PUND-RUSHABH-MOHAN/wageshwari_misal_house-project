@@ -16,11 +16,11 @@ IST = timezone(timedelta(hours=5, minutes=30))
 ALICE = {"sub": "aaaaaaaa-0000-0000-0000-000000000001", "email": "alice@example.com"}
 BOB = {"sub": "bbbbbbbb-0000-0000-0000-000000000002", "email": "bob@example.com"}
 
-# 06:00 IST on 13 Nov 2026: every slot today is still open (Early Bird closes 06:30).
+# 06:00 IST on 13 Nov 2026: every slot today is still open (the 9 AM slot closes 08:30).
 SIX_AM = datetime(2026, 11, 13, 6, 0, tzinfo=IST)
 TODAY, TOMORROW = "2026-11-13", "2026-11-14"
-MORNING = "Morning 8:00 - 9:00 AM"
-EARLY = "Early Bird 7:00 - 8:00 AM"
+EARLY = "Morning 9:00 - 10:00 AM"  # first slot of the day
+MORNING = "Morning 10:00 - 11:00 AM"
 
 
 @pytest.fixture
@@ -150,8 +150,8 @@ def test_stored_item_has_admin_index_fields(env):
     _, o, _ = place(adr)
     item = env["table"].get_item(Key={"PK": f"USER#{ALICE['sub']}", "SK": f"ORDER#{o['id']}"})["Item"]
     assert item["GSI1PK"] == f"ORDERDATE#{TODAY}"
-    assert item["GSI1SK"].startswith("08#2026-11-13T00:30:00.000Z#")
-    assert item["slot_id"] == "slot_morning"
+    assert item["GSI1SK"].startswith("10#2026-11-13T00:30:00.000Z#")
+    assert item["slot_id"] == "slot_10"
 
 
 def test_server_ignores_client_prices_and_uses_menu(env):
@@ -208,7 +208,7 @@ def test_same_key_same_body_returns_first_order(env):
 def test_replay_works_even_after_slot_closes(env):
     adr = make_address()
     _, first, _ = place(adr, key="retry-key-2", slot_label=EARLY)
-    env["clock"]["now"] = SIX_AM + timedelta(hours=1)  # Early Bird is now closed
+    env["clock"]["now"] = SIX_AM + timedelta(hours=3)  # 09:00: the 9 AM slot is now closed
     status, again, _ = place(adr, key="retry-key-2", slot_label=EARLY)
     assert status == 201 and again["id"] == first["id"]
 
@@ -341,9 +341,9 @@ def test_bad_request_fields(env, over):
 
 def test_slot_cutoff_30_minutes(env):
     adr = make_address()
-    env["clock"]["now"] = datetime(2026, 11, 13, 7, 29, tzinfo=IST)
-    assert place(adr, key="slot-key-1")[0] == 201  # Morning (8:00) closes at 7:30
-    env["clock"]["now"] = datetime(2026, 11, 13, 7, 30, tzinfo=IST)
+    env["clock"]["now"] = datetime(2026, 11, 13, 9, 29, tzinfo=IST)
+    assert place(adr, key="slot-key-1")[0] == 201  # the 10:00 slot closes at 9:30
+    env["clock"]["now"] = datetime(2026, 11, 13, 9, 30, tzinfo=IST)
     status, out, _ = place(adr, key="slot-key-2")
     assert status == 409 and error_code(out) == "SLOT_UNAVAILABLE"
     # The same slot tomorrow is fine
