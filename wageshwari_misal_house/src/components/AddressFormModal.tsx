@@ -302,6 +302,7 @@ export function AddressFormModal({
 
       {canUseMap ? (
         <LocationPickerModal
+          key={mapOpen ? 'map-open' : 'map-closed'} // fresh state each time it opens
           visible={visible && mapOpen}
           initial={location.kind === 'found' ? location.coords : null}
           onClose={() => setMapOpen(false)}
