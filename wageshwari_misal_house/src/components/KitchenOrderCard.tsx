@@ -15,6 +15,8 @@ import { istClockTime } from '@/utils/pricing';
 
 /** The single forward step the server allows from each status. */
 export const NEXT_STEP: Partial<Record<OrderStatus, { status: OrderStatus; label: string; icon: IconName }>> = {
+  // UPI: after checking the hotel's UPI app for this amount / order number / UTR.
+  PENDING_PAYMENT: { status: 'CONFIRMED', label: 'Payment received', icon: 'checkCircle' },
   CONFIRMED: { status: 'PREPARING', label: 'Start preparing', icon: 'flame' },
   PREPARING: { status: 'OUT_FOR_DELIVERY', label: 'Out for delivery', icon: 'bag' },
   OUT_FOR_DELIVERY: { status: 'DELIVERED', label: 'Mark delivered', icon: 'checkCircle' },
@@ -48,6 +50,26 @@ export function KitchenOrderCard({
         </View>
         <StatusBadge status={order.status} />
       </View>
+
+      {/* UPI orders: check the money before cooking */}
+      {order.status === 'PENDING_PAYMENT' ? (
+        <View style={styles.payCheck}>
+          <Text style={styles.payTitle}>
+            Check {formatCurrency(order.total)} in your UPI app
+          </Text>
+          <Text style={styles.meta}>
+            Note “Order {order.order_number}”
+            {order.utr ? '' : order.payment_expires_at ? ` · auto-cancels at ${istClockTime(order.payment_expires_at)} if unpaid` : ''}
+          </Text>
+          {order.utr ? (
+            <Text selectable style={styles.utr}>
+              UTR {order.utr}
+            </Text>
+          ) : (
+            <Text style={styles.meta}>The customer hasn’t entered a UTR yet.</Text>
+          )}
+        </View>
+      ) : null}
 
       {/* What to cook */}
       <View style={styles.items}>
@@ -128,7 +150,13 @@ export function KitchenOrderCard({
               style={styles.flex}
             />
           ) : null}
-          <Button title="Cancel" variant="ghost" onPress={onCancel} disabled={busy} style={styles.cancelBtn} />
+          <Button
+            title={order.status === 'PENDING_PAYMENT' ? 'Not received' : 'Cancel'}
+            variant="ghost"
+            onPress={onCancel}
+            disabled={busy}
+            style={styles.cancelBtn}
+          />
         </View>
       ) : null}
     </View>
@@ -170,4 +198,12 @@ const styles = StyleSheet.create({
   cancelled: { fontSize: 13, color: Colors.danger, fontWeight: '600' },
   actions: { flexDirection: 'row', gap: Spacing.sm, alignItems: 'center' },
   cancelBtn: { paddingHorizontal: Spacing.lg },
+  payCheck: {
+    gap: 4,
+    backgroundColor: Colors.warningSoft,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+  },
+  payTitle: { fontSize: 15, fontWeight: '800', color: Colors.warning },
+  utr: { fontSize: 16, fontWeight: '800', color: Colors.text, letterSpacing: 1 },
 });

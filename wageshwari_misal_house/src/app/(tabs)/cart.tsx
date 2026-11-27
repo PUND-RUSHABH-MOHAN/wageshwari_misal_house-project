@@ -35,10 +35,11 @@ import {
 
 type DayKey = 'today' | 'tomorrow';
 
-/** `available: false` shows the option greyed out. Online payment arrives in part 7. */
+/** `available: false` shows the option greyed out. */
 const PAYMENT_OPTIONS: { method: PaymentMethod; title: string; hint: string; icon: IconName; available: boolean }[] = [
   { method: 'cod', title: 'Cash on Delivery', hint: 'Pay cash or UPI to the rider', icon: 'cash', available: true },
-  { method: 'online', title: 'UPI / Online', hint: 'Coming soon', icon: 'upi', available: false },
+  // Direct UPI to the hotel (part 7): pay in your UPI app or by QR, then enter the UTR.
+  { method: 'online', title: 'UPI (pay now)', hint: 'GPay, PhonePe, Paytm or QR', icon: 'upi', available: true },
 ];
 
 export default function CartScreen() {
@@ -50,7 +51,7 @@ export default function CartScreen() {
 
   const [day, setDay] = useState<DayKey>(todayHasSlots ? 'today' : 'tomorrow');
   const [slotId, setSlotId] = useState<string | null>(null);
-  const payment: PaymentMethod = 'cod'; // the only option until online payment is ready
+  const [payment, setPayment] = useState<PaymentMethod>('cod');
   const [addressOpen, setAddressOpen] = useState(false);
   const [editing, setEditing] = useState<CartItem | null>(null);
   const [placing, setPlacing] = useState(false);
@@ -105,13 +106,17 @@ export default function CartScreen() {
     setError(null);
     setPlacing(true);
     try {
-      await placeOrder({
+      const order = await placeOrder({
         address_id: selectedAddress.id,
         delivery_date: deliveryDate,
         slot_label: slotLabel(selectedSlot),
         payment_method: payment,
       });
-      router.navigate('/orders');
+      if (order.status === 'PENDING_PAYMENT') {
+        router.push({ pathname: '/pay/[id]', params: { id: order.id } }); // pay now by UPI
+      } else {
+        router.navigate('/orders');
+      }
     } catch (e) {
       // The server re-checks prices, slot, address and stock; show what it said.
       setError(errorMessage(e));
@@ -250,6 +255,7 @@ export default function CartScreen() {
                   accessibilityRole="radio"
                   accessibilityState={{ selected, disabled: !opt.available }}
                   disabled={!opt.available}
+                  onPress={() => setPayment(opt.method)}
                   style={[
                     styles.payOption,
                     selected && styles.payOptionSelected,
@@ -299,7 +305,11 @@ export default function CartScreen() {
           <View>
             <Text style={styles.footerTotal}>{formatCurrency(bill.total)}</Text>
             <Text style={styles.footerHint}>
-              {shortBy > 0 ? `Add ${formatCurrency(shortBy)} more` : 'Pay on delivery'}
+              {shortBy > 0
+                ? `Add ${formatCurrency(shortBy)} more`
+                : payment === 'cod'
+                  ? 'Pay on delivery'
+                  : 'Pay by UPI next'}
             </Text>
           </View>
           <Button

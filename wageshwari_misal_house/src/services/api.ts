@@ -213,6 +213,9 @@ export const orderApi = {
     request<Order>('POST', '/orders', { token, body, headers: { 'Idempotency-Key': idempotencyKey } }),
   cancel: (token: string, id: string) =>
     request<Order>('POST', `/orders/${encodeURIComponent(id)}/cancel`, { token }),
+  /** "I've paid by UPI": the 12-digit UTR / UPI reference number. */
+  submitPayment: (token: string, id: string, utr: string) =>
+    request<Order>('POST', `/orders/${encodeURIComponent(id)}/payment`, { token, body: { utr } }),
 };
 
 // ---------------------------------------------------------------------------

@@ -3,11 +3,11 @@
 A food-ordering app for **Wagheshwar Misal House**, A/P Chandanzira, Jalna – Chh. Sambhajinagar
 Highway, Jalna 431203 (address in `src/constants/shop.ts`). Customers browse the menu
 (Misal, Thali, Vada Pav, Chaha), pick a spice level, choose a delivery slot and
-place orders (Cash on Delivery; online payment comes later).
+place orders (Cash on Delivery or direct UPI).
 
 > **Current status:** connected to the AWS backend (`../backend/`). Sign-up / login, the menu,
-> saved addresses, orders and the kitchen/admin screens all use the live API. Still to come:
-> menu photo upload, online payment, phone OTP login. Section 4 explains where the backend plugs in, and
+> saved addresses, orders, UPI payments and the kitchen/admin screens all use the live API.
+> Still to come: menu photo upload, phone OTP login. Section 4 explains where the backend plugs in, and
 > section 5 the JSON each screen expects.
 
 ---
@@ -104,6 +104,15 @@ Adding an address needs the phone's GPS position ("Use my current location", `ex
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
 
+**Live (Part 7):** direct UPI payments, no payment gateway. At checkout pick **UPI (pay now)**; after
+placing, the **Pay** screen (`src/app/pay/[id].tsx`) shows the amount, the hotel's UPI ID, a **Pay with UPI
+app** button (opens GPay / PhonePe / Paytm via the server's `upi://pay` link) and the same link as a **QR code**
+(`react-native-qrcode-svg` + `react-native-svg`) for paying from another phone. After paying, the customer
+types the **12-digit UTR** and taps *I've paid*; the hotel checks its UPI app and taps **Payment received** on the
+Kitchen tab, and the order continues as usual. Unpaid orders (no UTR) are cancelled after 30 minutes. On the
+Orders tab an unpaid UPI order has a **Pay now** button. Customers can't cancel once they've sent a UTR
+(refund through the hotel). Nothing confirms payments automatically: there's no gateway.
+
 **Live (Part 6):** kitchen and menu admin, for accounts in the Cognito `admin` group (how to add one:
 `backend/README.md` → "Make someone an admin"; then log out and in). Admins get:
 - a **Kitchen** tab (hidden for customers): today's or tomorrow's orders grouped by delivery slot, with
@@ -194,6 +203,7 @@ or *Maps SDK for Android* isn't enabled.
 | Orders | order history | `GET /orders` | **live** (`AppContext` → `loadOrders`) |
 | Orders | live status | `GET /orders` every 20 s while an order is in progress | **live** (polling) |
 | Orders | `cancelOrder()` | `POST /orders/:id/cancel` | **live** |
+| Pay (UPI) | `submitPayment()` | `POST /orders/:id/payment` `{utr}` | **live** (`src/app/pay/[id].tsx`) |
 | Kitchen (admins) | order board | `GET /admin/orders?date=` | **live** (`src/app/(tabs)/kitchen.tsx`) |
 | Kitchen (admins) | next step / cancel | `POST /admin/orders/:id/status` | **live** |
 | Manage menu (admins) | lists | `GET /admin/categories`, `GET /admin/products` | **live** (`src/app/admin-menu.tsx`) |
@@ -330,7 +340,7 @@ cart lives on the device:
 ```
 
 - Header `Idempotency-Key`: a random string (8–64 of `A-Z a-z 0-9 _ -`), the same for retries of one checkout.
-- `payment_method`: `"cod"` | `"online"` (online is refused until part 7)
+- `payment_method`: `"cod"` | `"online"` (= direct UPI: the order starts `PENDING_PAYMENT` with `upi_payment`)
 - `spice_level`: `"mild"` | `"medium"` | `"teekha"`. Only for products with `has_spice_level: true`.
 - `note`: optional, max 120 characters
 - `delivery_date`: today or tomorrow in India time; `slot_label` exactly as `slotLabel()` builds it.
@@ -450,7 +460,7 @@ and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and 
 | Delivery fee / GST | ₹30 flat / 5% | `src/utils/pricing.ts` |
 | Minimum order | ₹100 of food (before delivery and GST) | `src/utils/pricing.ts`, enforced by `backend/src/orders.py` |
 | Time zone | Slots, "today" and kitchen hours use India time (IST) even if the phone is set to another zone | `src/utils/pricing.ts` |
-| Payment | Cash on delivery only until online payment (part 7) | `src/app/(tabs)/cart.tsx`, enforced by the server |
+| Payment | Cash on delivery, or direct UPI: pay by link/QR, send the UTR, the hotel confirms; unpaid UPI orders cancel after 30 min | `cart.tsx`, `pay/[id].tsx`, enforced by the server |
 | Cancelling | Customers: only while `CONFIRMED` (before the kitchen starts). Kitchen: until delivered, with a reason | `AppContext.tsx` → `isCancellable`, enforced by the server |
 | Order steps (kitchen) | One at a time: Confirmed → Preparing → Out for delivery → Delivered | `KitchenOrderCard.tsx` → `NEXT_STEP`, enforced by the server |
 | Max quantity per add | 20 | `ProductCard.tsx`, `ProductDetailSheet.tsx` |

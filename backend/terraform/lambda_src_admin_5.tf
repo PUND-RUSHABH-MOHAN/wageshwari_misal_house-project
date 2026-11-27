@@ -2,6 +2,20 @@
 
 locals {
   lambda_src_admin_5 = <<PYSRC
+        page = users.table().query(**kwargs)
+        items.extend(page.get("Items", []))
+        if "LastEvaluatedKey" not in page:
+            return items
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+# ---------------------------------------------------------------------------
+# Menu: categories
+# ---------------------------------------------------------------------------
+CATEGORY_FIELDS = {
+    "name": lambda b: _text(b, "name", required=False, max_len=40),
+    "name_mr": lambda b: _text(b, "name_mr", required=False, max_len=40),
+    "image_url": _image_url,
     "sort_order": lambda b: _int(b, "sort_order", 0, 999, "`sort_order` must be a whole number from 0 to 999."),
     "is_active": lambda b: _bool(b, "is_active"),
 }
@@ -60,24 +74,5 @@ PRODUCT_FIELDS = {
     "name_mr": lambda b: _text(b, "name_mr", required=False, max_len=60),
     "description": lambda b: _text(b, "description", required=False, max_len=300),
     "price": lambda b: _int(
-        b, "price", MIN_PRICE_PAISE, MAX_PRICE_PAISE, "`price` must be whole paise from 100 (₹1) to 500000 (₹5,000)."
-    ),
-    "image_url": _image_url,
-    "is_veg": lambda b: _bool(b, "is_veg"),
-    "has_spice_level": lambda b: _bool(b, "has_spice_level"),
-    "is_available": lambda b: _bool(b, "is_available"),
-    "is_active": lambda b: _bool(b, "is_active"),
-}
-
-
-def to_admin_product(item: dict) -> dict:
-    return {**catalog.to_product(item), "is_active": bool(item.get("is_active", True))}
-
-
-def _check_category(category_id: str) -> dict:
-    return _get_catalog_item("CATEGORY", category_id, "Category")
-
-
-def list_products(event: dict) -> dict:
 PYSRC
 }

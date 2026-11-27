@@ -29,13 +29,29 @@ locals {
       handler = "admin.handler"
       files   = ["common.py", "users.py", "addresses.py", "orders.py", "catalog.py", "admin.py"]
     }
+    # Not behind the API: EventBridge Scheduler runs it every 10 minutes (scheduler.tf).
+    expire = {
+      handler = "expire.handler"
+      files   = ["common.py", "users.py", "addresses.py", "orders.py", "expire.py"]
+    }
   }
 
-  # Settings only one function needs, so the others aren't redeployed when they change.
+  # The functions API Gateway calls (everything except scheduled jobs).
+  api_functions = { for name, fn in local.functions : name => fn if name != "expire" }
+
+  upi_env = {
+    UPI_ID                 = lower(trimspace(var.upi_id))
+    UPI_PAYEE_NAME         = var.upi_payee_name
+    PAYMENT_WINDOW_MINUTES = tostring(var.payment_window_minutes)
+  }
+
+  # Settings only some functions need, so the others aren't redeployed when they change.
   function_env = {
-    orders = {
+    orders = merge(local.upi_env, {
       MIN_ORDER_PAISE = tostring(var.min_order_paise)
-    }
+    })
+    admin  = local.upi_env
+    expire = local.upi_env
   }
 }
 
@@ -95,7 +111,7 @@ resource "aws_lambda_function" "fn" {
 
 # Allow API Gateway (this API only) to invoke the functions.
 resource "aws_lambda_permission" "apigw" {
-  for_each      = local.functions
+  for_each      = local.api_functions
   statement_id  = "AllowApiGatewayInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.fn[each.key].function_name

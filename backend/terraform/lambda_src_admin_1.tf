@@ -21,6 +21,9 @@ Routes
 Order status rules
   - One step forward at a time: CONFIRMED -> PREPARING -> OUT_FOR_DELIVERY -> DELIVERED.
     DELIVERED also marks a cash order as paid (the rider collected the cash).
+  - UPI orders start at PENDING_PAYMENT. PENDING_PAYMENT -> CONFIRMED means "Payment received":
+    someone checked the hotel's UPI app (amount + order number / UTR); it marks the order paid.
+    If the money never came, cancel with a reason instead.
   - The kitchen may cancel any order that isn't delivered yet; a reason (3-120 chars) is
     required and shown to the customer.
   - Each change is conditional on the status the admin saw, so two people tapping at once
@@ -48,6 +51,7 @@ import users
 from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response, role_from_claims
 
 NEXT_STATUS = {
+    "PENDING_PAYMENT": "CONFIRMED",  # UPI: payment received (checked by hand in the hotel's UPI app)
     "CONFIRMED": "PREPARING",
     "PREPARING": "OUT_FOR_DELIVERY",
     "OUT_FOR_DELIVERY": "DELIVERED",
@@ -61,19 +65,5 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 def _admin(event: dict) -> dict:
     claims = jwt_claims(event)
-    if role_from_claims(claims) != "admin":
-        raise ApiError(403, "FORBIDDEN", "This needs an admin account.")
-    return claims
-
-
-def _now() -> str:
-    return orders._iso(orders._now_utc())
-
-
-def _path_id(event: dict) -> str:
-    return (event.get("pathParameters") or {}).get("id", "")
-
-
-# ---------------------------------------------------------------------------
 PYSRC
 }

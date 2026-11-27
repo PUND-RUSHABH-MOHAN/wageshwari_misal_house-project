@@ -6,17 +6,23 @@ Routes
   GET  /orders              -> Order[]     (newest first, latest 50)
   GET  /orders/{id}         -> Order
   POST /orders/{id}/cancel  -> 200 Order
+  POST /orders/{id}/payment -> 200 Order   {utr}: "I've paid by UPI" (part 7)
 
 Rules (the app shows the same ones; the server's answer is final)
   - Prices and names come from the menu in the table, never from the app. Each order keeps a
     frozen copy of the dish names/prices and of the delivery address.
   - Bill: subtotal + ₹30 delivery + 5% GST on the subtotal (rounded half up), integer paise.
   - Minimum order: MIN_ORDER_PAISE of food (subtotal), default ₹100.
-  - Cash on delivery only until online payments arrive (part 7).
+  - Payment: cash on delivery (starts CONFIRMED) or direct UPI, `payment_method: "online"` (part 7).
+    A UPI order starts PENDING_PAYMENT with `upi_payment` (UPI ID, amount, link for the UPI app / QR).
+    The customer pays in their UPI app and sends the 12-digit UTR; the kitchen checks its UPI app
+    and confirms (admin.py). There's no gateway, so nothing confirms payments automatically.
+    Unpaid UPI orders without a UTR are cancelled after PAYMENT_WINDOW_MINUTES (expire.py).
   - Delivery date: today or tomorrow in India time (IST, fixed +05:30). A slot for today
     closes 30 minutes before it starts.
   - The address must be the user's and still inside the delivery area.
-  - Cancel only while CONFIRMED / PENDING_PAYMENT (before the kitchen starts).
+  - Cancel only while CONFIRMED / PENDING_PAYMENT (before the kitchen starts), and not once a UPI
+    payment has been reported (UTR sent): that needs a refund, so the hotel handles it.
   - Idempotency: the same Idempotency-Key with the same body returns the first order instead
     of creating a second one (records expire after 24 h via the table's TTL).
 
@@ -25,6 +31,7 @@ Storage (table wmh-main)
   PK = "USER#<sub>",  SK = "IDEMP#<key>"        idempotency record, expires_at = TTL
   PK = "COUNTER",     SK = "ORDER#<YYYYMMDD>"   daily running number for order_number
   PK = "ORDERREF#<id>", SK = "ORDER"            which user an order belongs to (admin lookups)
+  PK = "UTR#<utr>",   SK = "UTR"                which order a UPI reference was used for (no reuse)
   Orders also carry GSI1PK = "ORDERDATE#<delivery_date>" / GSI1SK: index GSI1 lists a day's
   orders by slot for the kitchen (admin.py).
 """
@@ -39,6 +46,7 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from urllib.parse import quote
 
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
@@ -76,6 +84,7 @@ _ADDRESS_ID_RE = re.compile(r"^adr_[0-9a-f]{16}$")
 _PRODUCT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_UTR_RE = re.compile(r"^\d{12}$")  # UPI transaction reference (RRN): 12 digits
 
 
 def _now_utc() -> datetime:
@@ -89,6 +98,43 @@ def _iso(moment: datetime) -> str:
 
 def min_order_paise() -> int:
     return int(os.environ.get("MIN_ORDER_PAISE", "10000"))
+
+
+# ---------------------------------------------------------------------------
+# Direct UPI (part 7)
+# ---------------------------------------------------------------------------
+def upi_settings() -> tuple[str, str]:
+    """(UPI ID, name shown to the payer). Empty UPI ID = UPI payments are switched off."""
+    return os.environ.get("UPI_ID", "").strip().lower(), os.environ.get("UPI_PAYEE_NAME", "").strip()
+
+
+def payment_window() -> timedelta:
+    return timedelta(minutes=int(os.environ.get("PAYMENT_WINDOW_MINUTES", "30")))
+
+
+def amount_text(paise: int) -> str:
+    """25050 -> "250.50" (the `am` format UPI apps expect)."""
+    return f"{paise // 100}.{paise % 100:02d}"
+
+
+def upi_payment(item: dict) -> dict | None:
+    """What the app needs to pay a UPI order that isn't paid yet, else None."""
+    vpa, name = upi_settings()
+    if (
+        not vpa
+        or item.get("payment_method") != "online"
+        or item.get("status") != "PENDING_PAYMENT"
+        or item.get("payment_status") == "paid"
+    ):
+        return None
+    amount = amount_text(int(item["total"]))
+    number = item["order_number"]
+    # NPCI deep-link format; the same string is shown as a QR code in the app.
+    uri = (
+        f"upi://pay?pa={quote(vpa, safe='@.')}&pn={quote(name)}&am={amount}&cu=INR"
+        f"&tn={quote('Order ' + number)}&tr={quote(number)}"
+    )
+    return {"upi_id": vpa, "payee_name": name, "amount": amount, "note": f"Order {number}", "uri": uri}
 
 
 def rupees(paise: int) -> str:
@@ -191,9 +237,9 @@ def _clean_request(body: dict) -> dict:
     payment = body.get("payment_method")
     if payment not in PAYMENT_METHODS:
         raise ApiError(400, "VALIDATION_ERROR", "`payment_method` must be cod or online.")
-    if payment == "online":
+    if payment == "online" and not upi_settings()[0]:
         raise ApiError(
-            400, "PAYMENT_METHOD_UNAVAILABLE", "Online payment is coming soon. Please choose Cash on Delivery."
+            400, "PAYMENT_METHOD_UNAVAILABLE", "UPI payment isn't available right now. Please choose Cash on Delivery."
         )
     return {
         "address_id": address_id,
@@ -294,7 +340,8 @@ def _next_order_number(now: datetime) -> str:
 ORDER_FIELDS = (
     "id", "order_number", "user_id", "address_snapshot", "delivery_date", "slot_label", "status",
     "subtotal", "delivery_fee", "tax", "total", "payment_method", "payment_status", "created_at", "items",
-    "cancelled_by", "cancel_reason",  # only on cancelled orders; cancel_reason only from the kitchen
+    "cancelled_by", "cancel_reason",  # only on cancelled orders (kitchen / system cancels give a reason)
+    "utr", "payment_expires_at",  # UPI orders: the reference the customer sent; pay-by time
 )
 
 
@@ -305,7 +352,11 @@ def history_entry(status: str, at: str, by: str) -> dict:
 
 def to_order(item: dict) -> dict:
     """DynamoDB item -> the app's `Order` (src/types/index.ts)."""
-    return json.loads(json.dumps({f: item[f] for f in ORDER_FIELDS if f in item}, default=_json_default))
+    out = json.loads(json.dumps({f: item[f] for f in ORDER_FIELDS if f in item}, default=_json_default))
+    pay = upi_payment(item)
+    if pay:
+        out["upi_payment"] = pay
+    return out
 
 
 def _get_order_item(user_id: str, order_id: str) -> dict:
@@ -403,6 +454,8 @@ def create_order(event: dict) -> dict:
         )
 
     created_at = _iso(now)
+    upi = request["payment_method"] == "online"
+    status = "PENDING_PAYMENT" if upi else "CONFIRMED"
     order = _to_ddb(
         {
             **_key(user_id, f"ORDER#{order_id}"),
@@ -415,14 +468,15 @@ def create_order(event: dict) -> dict:
             "slot_label": request["slot_label"],
             "slot_id": slot_id,
             "slot_start_hour": start_hour,
-            "status": "CONFIRMED",  # COD; online would start at PENDING_PAYMENT (part 7)
+            "status": status,  # COD: CONFIRMED; UPI: PENDING_PAYMENT until the kitchen sees the money
             **bill,
             "payment_method": request["payment_method"],
             "payment_status": "pending",
             "created_at": created_at,
             "updated_at": created_at,
             "items": lines,
-            "status_history": [history_entry("CONFIRMED", created_at, "customer")],
+            "status_history": [history_entry(status, created_at, "customer")],
+            **({"payment_expires_at": _iso(now + payment_window())} if upi else {}),
             # Index GSI1: the kitchen's "all orders for a delivery date, by slot" (admin.py).
             "GSI1PK": f"ORDERDATE#{request['delivery_date']}",
             "GSI1SK": f"{start_hour:02d}#{created_at}#{order_id}",
@@ -479,7 +533,8 @@ def cancel_order(event: dict) -> dict:
                 "SET #s = :cancelled, cancelled_at = :now, updated_at = :now, cancelled_by = :by, "
                 "status_history = list_append(if_not_exists(status_history, :empty), :entry)"
             ),
-            ConditionExpression="#s IN (:pending, :confirmed)",
+            # Not once the kitchen started, and not after a UPI payment was reported (needs a refund).
+            ConditionExpression="#s IN (:pending, :confirmed) AND attribute_not_exists(utr)",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":cancelled": "CANCELLED",
@@ -495,10 +550,93 @@ def cancel_order(event: dict) -> dict:
     except ClientError as err:
         if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
+        if current.get("utr") and current["status"] in CANCELLABLE:
+            raise ApiError(
+                409,
+                "ORDER_NOT_CANCELLABLE",
+                "You've already paid for this order by UPI. Please call the hotel to cancel and get a refund.",
+            ) from err
         raise ApiError(
             409, "ORDER_NOT_CANCELLABLE", "The kitchen has already started this order, so it can't be cancelled."
         ) from err
     return response(200, to_order(updated))
+
+
+def submit_payment(event: dict) -> dict:
+    """POST /orders/{id}/payment {utr}: the customer says "I've paid by UPI" and gives the reference.
+
+    Allowed while the order waits for payment, also to correct a mistyped UTR before the kitchen
+    has confirmed it. A UTR can belong to one order only (409 UTR_ALREADY_USED).
+    """
+    user_id = jwt_claims(event)["sub"]
+    order_id = (event.get("pathParameters") or {}).get("id", "")
+    body = parse_body(event)
+    unknown = sorted(set(body) - {"utr"})
+    if unknown:
+        raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s): {', '.join(unknown)}.")
+    utr = body.get("utr")
+    utr = re.sub(r"\s", "", utr) if isinstance(utr, str) else ""
+    if not _UTR_RE.match(utr):
+        raise ApiError(400, "VALIDATION_ERROR", "Enter the 12-digit UTR / UPI reference number from your UPI app.")
+
+    current = _get_order_item(user_id, order_id)
+    if current.get("payment_method") != "online":
+        raise ApiError(409, "ORDER_NOT_PAYABLE", "This is a cash on delivery order.")
+    if current["status"] != "PENDING_PAYMENT" or current.get("payment_status") == "paid":
+        message = (
+            "This order was cancelled, so please don't pay for it."
+            if current["status"] == "CANCELLED"
+            else "This order's payment is already confirmed."
+        )
+        raise ApiError(409, "ORDER_NOT_PAYABLE", message)
+    if current.get("utr") == utr:
+        return response(200, to_order(current))  # sending the same UTR twice is harmless
+
+    now = _iso(_now_utc())
+    table = users.table()
+    steps = [
+        {   # claim the UTR for this order
+            "Put": {
+                "TableName": table.name,
+                "Item": {"PK": f"UTR#{utr}", "SK": "UTR", "entity": "UTR", "order_id": current["id"],
+                         "user_id": user_id, "created_at": now},
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }
+        },
+        {
+            "Update": {
+                "TableName": table.name,
+                "Key": _key(user_id, f"ORDER#{current['id']}"),
+                "UpdateExpression": (
+                    "SET utr = :utr, payment_status = :submitted, payment_submitted_at = :now, updated_at = :now"
+                ),
+                "ConditionExpression": "#s = :pending AND payment_status <> :paid",
+                "ExpressionAttributeNames": {"#s": "status"},
+                "ExpressionAttributeValues": {
+                    ":utr": utr, ":submitted": "submitted", ":now": now, ":pending": "PENDING_PAYMENT", ":paid": "paid",
+                },
+            }
+        },
+    ]
+    if current.get("utr"):  # a correction: free the old, mistyped UTR
+        steps.append({
+            "Delete": {
+                "TableName": table.name,
+                "Key": {"PK": f"UTR#{current['utr']}", "SK": "UTR"},
+                "ConditionExpression": "order_id = :me",
+                "ExpressionAttributeValues": {":me": current["id"]},
+            }
+        })
+    try:
+        table.meta.client.transact_write_items(TransactItems=steps)
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "TransactionCanceledException":
+            raise
+        reasons = [r.get("Code") for r in err.response.get("CancellationReasons", [])]
+        if reasons and reasons[0] == "ConditionalCheckFailed":
+            raise ApiError(409, "UTR_ALREADY_USED", "This UTR was already used for another order.") from err
+        raise ApiError(409, "ORDER_NOT_PAYABLE", "This order changed meanwhile. Pull down to refresh.") from err
+    return response(200, to_order(_get_order_item(user_id, current["id"])))
 
 
 ROUTES = {
@@ -506,6 +644,7 @@ ROUTES = {
     "GET /orders": list_orders,
     "GET /orders/{id}": get_order,
     "POST /orders/{id}/cancel": cancel_order,
+    "POST /orders/{id}/payment": submit_payment,
 }
 
 

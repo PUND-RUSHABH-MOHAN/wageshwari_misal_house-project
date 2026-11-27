@@ -2,6 +2,26 @@
 
 locals {
   lambda_src_admin_4 = <<PYSRC
+
+
+def _bool(body: dict, field: str) -> bool | None:
+    if field not in body:
+        return None
+    if not isinstance(body[field], bool):
+        raise ApiError(400, "VALIDATION_ERROR", f"`{field}` must be true or false.")
+    return body[field]
+
+
+def _int(body: dict, field: str, low: int, high: int, message: str) -> int | None:
+    if field not in body:
+        return None
+    value = body[field]
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ApiError(400, "VALIDATION_ERROR", message)
+    return value
+
+
+def _image_url(body: dict) -> str | None:
     url = _text(body, "image_url", required=False, max_len=500)
     if url and not url.startswith("https://"):
         raise ApiError(400, "VALIDATION_ERROR", "`image_url` must start with https://.")
@@ -63,19 +83,5 @@ def _all(kind: str) -> list[dict]:
     items: list[dict] = []
     kwargs = {"KeyConditionExpression": Key("PK").eq("CATALOG") & Key("SK").begins_with(f"{kind}#")}
     while True:
-        page = users.table().query(**kwargs)
-        items.extend(page.get("Items", []))
-        if "LastEvaluatedKey" not in page:
-            return items
-        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-
-
-# ---------------------------------------------------------------------------
-# Menu: categories
-# ---------------------------------------------------------------------------
-CATEGORY_FIELDS = {
-    "name": lambda b: _text(b, "name", required=False, max_len=40),
-    "name_mr": lambda b: _text(b, "name_mr", required=False, max_len=40),
-    "image_url": _image_url,
 PYSRC
 }

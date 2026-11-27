@@ -59,3 +59,24 @@ variable "min_order_paise" {
   type        = number
   default     = 10000 # ₹100
 }
+
+# --- Direct UPI payments (part 7) -------------------------------------------------------------
+# The UPI ID is NOT committed (it contains a phone number and this repo is public). Set it in
+# `upi.auto.tfvars` in the Terraform workspace (git-ignored). Empty = UPI checkout switched off.
+variable "upi_id" {
+  description = "Hotel's UPI ID (VPA) customers pay to, e.g. a business UPI ID. Empty disables UPI."
+  type        = string
+  default     = ""
+}
+
+variable "upi_payee_name" {
+  description = "Name customers see in their UPI app when paying."
+  type        = string
+  default     = "Wagheshwar Misal House"
+}
+
+variable "payment_window_minutes" {
+  description = "Unpaid UPI orders (no UTR sent) are cancelled after this many minutes."
+  type        = number
+  default     = 30
+}

@@ -8,6 +8,7 @@ Status:
 - **Part 3, menu + photos**: deployed 2026-11-24. API `https://cyfnnlsjga.execute-api.ap-south-1.amazonaws.com`, photos `https://d2n5hm5b49hk3p.cloudfront.net`.
 - **Part 4, saved addresses**: 3 km GPS delivery area around the hotel (19.856833, 75.851944).
 - **Part 5, orders**: deployed 2026-11-25. Place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
+- **Part 7, direct UPI payments** (no gateway), deployed 2026-11-27: UPI link + QR to the hotel's UPI ID, customer sends the UTR, the kitchen confirms "Payment received"; unpaid orders auto-cancel after 30 minutes.
 - **Part 6, kitchen + menu admin**: deployed 2026-11-25. Order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
 
 ```
@@ -20,7 +21,8 @@ backend/
 │   ├── catalog.py           /categories, /products (the menu)
 │   ├── addresses.py         /addresses (saved delivery addresses, 3 km check)
 │   ├── orders.py            /orders (place, list, view, cancel)
-│   └── admin.py             /admin/* (kitchen order board, status moves, menu editing)
+│   ├── admin.py             /admin/* (kitchen order board, status moves, menu editing)
+│   └── expire.py            scheduled: cancels unpaid UPI orders (EventBridge Scheduler)
 ├── tests/                   pytest + moto (no AWS account touched)
 ├── scripts/
 │   ├── gen_lambda_sources.py   src/*.py  ->  terraform/lambda_src_*.tf
@@ -28,22 +30,24 @@ backend/
 │   ├── verify-catalog.ps1      check of the menu API + CloudFront photos
 │   ├── verify-addresses.ps1    check of the addresses API with a real account
 │   ├── verify-orders.ps1       places one real order for tomorrow, then cancels it
-│   └── verify-admin.ps1        kitchen + menu admin checks with an admin account
+│   ├── verify-admin.ps1        kitchen + menu admin checks with an admin account
+│   └── verify-payments.ps1     UPI payment flow with an admin account (no real money)
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (83 resources)
+## What gets created (89 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
 | Cognito User Pool | `wmh-users` | The user directory. Stores emails and password hashes, emails the confirmation and reset codes, issues JWTs. |
 | Cognito app client | `wmh-app` | How the mobile app identifies itself to the pool. Public (no secret), because anything in an APK can be extracted. |
 | Cognito group | `admin` | Members get `role: "admin"`: the Kitchen tab and Manage menu in the app, and the `/admin/*` routes. Added by hand (see "Make someone an admin"), so no email is in the repo. |
-| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
+| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to) and `UTR#<utr>` (which order a UPI reference was used for). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
 | Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
 | IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query/delete items in `wmh-main`. Nothing else. |
-| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders`, `wmh-admin` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`. |
-| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 28 routes, a JWT authorizer on `/me`, `/addresses`, `/orders` and `/admin/*` (admin.py also checks the `admin` group), throttled to 50 req/s (burst 100). |
+| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders`, `wmh-admin`, `wmh-expire` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`; orders/admin/expire get `UPI_ID`, `UPI_PAYEE_NAME`, `PAYMENT_WINDOW_MINUTES`. |
+| EventBridge Scheduler | `wmh-expire-unpaid-upi` + IAM role `wmh-scheduler` | AWS's managed timer: runs `wmh-expire` every 10 minutes. Its role may invoke only that function. Free at this volume. |
+| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 29 routes, a JWT authorizer on `/me`, `/addresses`, `/orders` and `/admin/*` (admin.py also checks the `admin` group), throttled to 50 req/s (burst 100). |
 | S3 bucket | `wmh-media-630287363216` | Menu photos under `menu/`. Fully private: all public access blocked. |
 | CloudFront | `d2n5hm5b49hk3p.cloudfront.net` | CDN in front of the bucket (price class 200, includes India). The only reader of the bucket, via Origin Access Control. |
 | CloudWatch log groups | `/aws/lambda/wmh-*`, `/aws/apigateway/wmh-api` | 14-day retention. Access logs never include headers or bodies. |
@@ -75,6 +79,7 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `GET /orders` | JWT | – | `200 Order[]`: newest first, latest 50 |
 | `GET /orders/{id}` | JWT | – | `200 Order` |
 | `POST /orders/{id}/cancel` | JWT | – | `200 Order` (already cancelled → same answer) |
+| `POST /orders/{id}/payment` | JWT | `{utr}` (12 digits) | `200 Order` with `payment_status: "submitted"` |
 | `GET /admin/orders?date=YYYY-MM-DD` | JWT + admin | – | `200 AdminOrder[]` for that delivery day (default today, IST), by slot then time |
 | `POST /admin/orders/{id}/status` | JWT + admin | `{status, reason?}` | `200 AdminOrder` |
 | `GET /admin/categories` | JWT + admin | – | `200 Category[]`, hidden ones included |
@@ -106,8 +111,8 @@ Order rules (all enforced by the server; the app shows the same ones):
 - **Bill**: subtotal + ₹30 delivery + 5% GST on the subtotal, rounded half up, integer paise.
 - **Minimum order ₹100 of food** (subtotal, before delivery and GST) → else `422 BELOW_MINIMUM_ORDER`.
   Change `min_order_paise` in `terraform/variables.tf` (and `MIN_ORDER_PAISE` in the app's `pricing.ts`).
-- **Cash on delivery only** until Part 7: `payment_method: "online"` → `400 PAYMENT_METHOD_UNAVAILABLE`.
-  COD orders start `CONFIRMED`, `payment_status: "pending"`.
+- **Payment**: `cod` starts `CONFIRMED`, `payment_status: "pending"` (paid on delivery). `online` = direct UPI
+  (Part 7, below); if no UPI ID is configured it's `400 PAYMENT_METHOD_UNAVAILABLE`.
 - **Dates in India time** (IST, fixed +05:30): today or tomorrow only; a slot for today closes 30 minutes
   before it starts → `409 SLOT_UNAVAILABLE`. `slot_label` must be one of the app's five labels exactly.
 - **Items**: 1–20 lines, quantity 1–20, `spice_level` only on dishes with spice levels, `note` ≤ 120 chars.
@@ -122,13 +127,33 @@ Order rules (all enforced by the server; the app shows the same ones):
 - Stored but not returned: `GSI1PK = ORDERDATE#<delivery_date>`, `GSI1SK = <slot hour>#<created_at>#<id>`,
   ready for the Part 6 kitchen index ("all orders for a day, by slot") without a data migration.
 
+Direct UPI rules (Part 7). There's **no payment gateway**, so nothing tells the server that money arrived:
+a person checks the hotel's UPI app.
+- A UPI order starts `PENDING_PAYMENT` with `payment_expires_at` (now + 30 min) and, while unpaid,
+  `upi_payment: {upi_id, payee_name, amount, note, uri}`. `uri` is an NPCI `upi://pay?pa=…&pn=…&am=…&cu=INR&tn=Order WMH-…&tr=WMH-…`
+  link: the app opens it (UPI app chooser) and shows it as a QR code. The server builds it from the order total.
+- `POST /orders/{id}/payment {utr}`: the customer's 12-digit UTR (UPI reference). `payment_status: "submitted"`.
+  A UTR can be used for one order only (`409 UTR_ALREADY_USED`); a mistyped UTR can be replaced until the kitchen
+  confirms. Cancelled / paid / cash orders → `409 ORDER_NOT_PAYABLE`.
+- The customer can cancel until they send a UTR; after that it's `409 ORDER_NOT_CANCELLABLE` (refunds go through
+  the hotel, by hand, from its UPI app).
+- Kitchen: `PENDING_PAYMENT → CONFIRMED` = "Payment received" (sets `payment_status: "paid"`), allowed with or
+  without a UTR. Money not there → kitchen cancel with a reason. Cooking can't start before payment.
+- `wmh-expire` (every 10 min) cancels `PENDING_PAYMENT` orders **without a UTR** whose `payment_expires_at` has
+  passed: `cancelled_by: "system"`, reason "Payment not received in time…". Orders with a UTR are left for the kitchen.
+- **UPI settings** live in the Terraform workspace file `upi.auto.tfvars` (git-ignored, because the UPI ID can
+  contain a phone number): `upi_id = "…"`. `upi_payee_name` and `payment_window_minutes` are in `variables.tf`.
+  A business UPI ID is recommended: UPI apps often decline app-link payments to personal UPI IDs, and business
+  apps announce each payment.
+
 Admin rules (Part 6):
 - **Who**: accounts in the Cognito group `admin`; everyone else gets `403 FORBIDDEN` on `/admin/*`.
-- **Status moves**, one step at a time: `CONFIRMED → PREPARING → OUT_FOR_DELIVERY → DELIVERED`; anything else
+- **Status moves**, one step at a time: `(PENDING_PAYMENT →) CONFIRMED → PREPARING → OUT_FOR_DELIVERY → DELIVERED`; anything else
   is `409 INVALID_STATUS_CHANGE`. `DELIVERED` also sets `payment_status: "paid"` for cash orders. Each move is
   conditional on the status the admin saw, so two people tapping at once can't skip a step (`409 ORDER_CHANGED`).
 - **Kitchen cancel**: any order not yet delivered, with a `reason` of 3–120 characters, shown to the customer
-  as `cancel_reason` (`cancelled_by: "kitchen"`). Customer cancels record `cancelled_by: "customer"`.
+  as `cancel_reason` (`cancelled_by: "kitchen"`). Customer cancels record `cancelled_by: "customer"`; UPI
+  auto-cancels `cancelled_by: "system"`.
 - `AdminOrder` = `Order` + `status_history: [{status, at, by}]` (`by` = `"customer"` or the admin's email).
 - **Menu**: `AdminProduct` = `Product` + `is_active`. `is_active: false` hides a dish from `GET /products` and
   ordering it gives `409 PRODUCT_UNAVAILABLE`; `is_available: false` shows it as sold out. Prices ₹1–₹5,000
@@ -144,6 +169,7 @@ Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PAS
 `BELOW_MINIMUM_ORDER` (422), `PAYMENT_METHOD_UNAVAILABLE`, `SLOT_UNAVAILABLE` (409),
 `PRODUCT_UNAVAILABLE` (409), `IDEMPOTENCY_CONFLICT` (409), `ORDER_NOT_CANCELLABLE` (409), `CONFLICT` (409),
 `FORBIDDEN` (403), `INVALID_STATUS_CHANGE` (409), `ORDER_CHANGED` (409),
+`UTR_ALREADY_USED` (409), `ORDER_NOT_PAYABLE` (409),
 `EMAIL_DELIVERY_FAILED` (502), `EMAIL_CHANGE_NOT_SUPPORTED`, `CHALLENGE_REQUIRED`,
 `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`.
 
@@ -209,7 +235,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-211 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
+234 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
 with mocks, and `verify-auth.ps1` checks them for real.
 
 ## Verify after deploy
@@ -253,6 +279,12 @@ real order for tomorrow, moves it to Preparing, then cancels it from the kitchen
 .\backend\scripts\verify-admin.ps1 -Email owner@example.com -CustomerEmail you+wmh1@gmail.com
 ```
 
+UPI payments (no real money; uses an admin account as both customer and kitchen, and cancels its test order):
+
+```powershell
+.\backend\scripts\verify-payments.ps1 -Email owner@example.com
+```
+
 If PowerShell blocks a script: `Set-ExecutionPolicy -Scope Process Bypass`.
 
 Logs, if something fails:
@@ -263,6 +295,7 @@ aws logs tail /aws/lambda/wmh-catalog --since 15m --profile wmh --region ap-sout
 aws logs tail /aws/lambda/wmh-addresses --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-orders --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-admin --since 15m --profile wmh --region ap-south-1
+aws logs tail /aws/lambda/wmh-expire --since 1h --profile wmh --region ap-south-1
 aws logs tail /aws/apigateway/wmh-api --since 15m --profile wmh --region ap-south-1
 ```
 
@@ -293,6 +326,18 @@ aws cognito-idp admin-remove-user-from-group --user-pool-id ap-south-1_Szcz11NPr
 The group travels inside the login token, so **log out and back in** in the app afterwards (or wait up
 to an hour for the automatic token refresh). The Kitchen tab and Account → Kitchen tools → Manage menu
 then appear. This is done by hand on purpose, so no one's email is committed to this public repo.
+
+## Change the UPI ID
+
+The UPI ID customers pay to is a private Terraform setting (it can contain a phone number and this repo is
+public). It lives only in `upi.auto.tfvars` in the Terraform workspace, never in git:
+
+```hcl
+upi_id = "yourbusiness@okaxis"
+```
+
+Change that file, plan, apply. Only `wmh-orders`, `wmh-admin` and `wmh-expire` are updated; orders still
+waiting for payment show the new ID straight away. To switch UPI checkout off, set `upi_id = ""`.
 
 ## Changing the menu
 

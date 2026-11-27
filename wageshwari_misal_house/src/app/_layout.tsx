@@ -36,6 +36,8 @@ function RootNavigator() {
         <Stack.Screen name="(tabs)" />
         {/* Admins only (the screen and the server both check). */}
         <Stack.Screen name="admin-menu" />
+        {/* Pay a UPI order (part 7) */}
+        <Stack.Screen name="pay/[id]" />
       </Stack.Protected>
       <Stack.Protected guard={!isLoggedIn}>
         <Stack.Screen name="login" />
