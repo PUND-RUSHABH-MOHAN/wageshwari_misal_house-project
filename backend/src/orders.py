@@ -18,8 +18,9 @@ Rules (the app shows the same ones; the server's answer is final)
     The customer pays in their UPI app and sends the 12-digit UTR; the kitchen checks its UPI app
     and confirms (admin.py). There's no gateway, so nothing confirms payments automatically.
     Unpaid UPI orders without a UTR are cancelled after PAYMENT_WINDOW_MINUTES (expire.py).
-  - Delivery date: today or tomorrow in India time (IST, fixed +05:30). A slot for today
-    closes 30 minutes before it starts.
+  - Delivery date: today or tomorrow in India time (IST, fixed +05:30). One-hour slots from
+    9:00 AM to 9:00 PM; a slot for today closes 30 minutes before it starts.
+  - The hotel can switch online orders off (store.py): new orders get 409 STORE_CLOSED.
   - The address must be the user's and still inside the delivery area.
   - Cancel only while CONFIRMED / PENDING_PAYMENT (before the kitchen starts), and not once a UPI
     payment has been reported (UTR sent): that needs a refund, so the hotel handles it.
@@ -52,6 +53,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 import addresses
+import store
 import users
 from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response
 
@@ -70,12 +72,21 @@ SLOT_CUTOFF_MINUTES = 30
 LIST_LIMIT = 50
 
 # Mirror of DELIVERY_SLOTS in the app (src/utils/pricing.ts); label = f"{name} {time}".
+# One-hour slots, 9:00 AM - 9:00 PM (owner, 2026-11-27). Orders placed with the old
+# 7 AM - 1 PM slots keep their stored label.
 SLOTS = [
-    ("slot_early", "Early Bird", "7:00 - 8:00 AM", 7),
-    ("slot_morning", "Morning", "8:00 - 9:00 AM", 8),
-    ("slot_breakfast", "Breakfast", "9:00 - 10:00 AM", 9),
-    ("slot_brunch", "Brunch", "10:00 - 11:00 AM", 10),
-    ("slot_lunch", "Lunch", "12:00 - 1:00 PM", 12),
+    ("slot_09", "Morning", "9:00 - 10:00 AM", 9),
+    ("slot_10", "Morning", "10:00 - 11:00 AM", 10),
+    ("slot_11", "Morning", "11:00 AM - 12:00 PM", 11),
+    ("slot_12", "Afternoon", "12:00 - 1:00 PM", 12),
+    ("slot_13", "Afternoon", "1:00 - 2:00 PM", 13),
+    ("slot_14", "Afternoon", "2:00 - 3:00 PM", 14),
+    ("slot_15", "Afternoon", "3:00 - 4:00 PM", 15),
+    ("slot_16", "Afternoon", "4:00 - 5:00 PM", 16),
+    ("slot_17", "Evening", "5:00 - 6:00 PM", 17),
+    ("slot_18", "Evening", "6:00 - 7:00 PM", 18),
+    ("slot_19", "Evening", "7:00 - 8:00 PM", 19),
+    ("slot_20", "Evening", "8:00 - 9:00 PM", 20),
 ]
 SLOTS_BY_LABEL = {f"{name} {span}": (slot_id, start) for slot_id, name, span, start in SLOTS}
 
@@ -436,7 +447,9 @@ def create_order(event: dict) -> dict:
 
     record = _live_idempotency_record(user_id, key, now)
     if record is not None:
-        return _replay(user_id, record, request_hash)
+        return _replay(user_id, record, request_hash)  # placed before any closing: still answered
+
+    store.ensure_open()  # 409 STORE_CLOSED while the hotel has online orders switched off
 
     slot_id, start_hour = _check_slot(request["delivery_date"], request["slot_label"], now)
     snapshot = _address_snapshot(claims, request["address_id"])

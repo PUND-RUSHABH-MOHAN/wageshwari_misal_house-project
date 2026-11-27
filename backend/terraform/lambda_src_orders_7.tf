@@ -2,6 +2,21 @@
 
 locals {
   lambda_src_orders_7 = <<PYSRC
+    """One transaction: the order, its ORDERREF pointer, and the idempotency record."""
+    # The resource's client converts plain Python values itself (no {"S": ...} wrapping).
+    client = users.table().meta.client
+    name = users.table().name
+    client.transact_write_items(
+        TransactItems=[
+            {
+                "Put": {
+                    "TableName": name,
+                    "Item": order,
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }
+            },
+            {
+                "Put": {
                     "TableName": name,
                     "Item": {
                         "PK": f"ORDERREF#{order['id']}",
@@ -38,7 +53,9 @@ def create_order(event: dict) -> dict:
 
     record = _live_idempotency_record(user_id, key, now)
     if record is not None:
-        return _replay(user_id, record, request_hash)
+        return _replay(user_id, record, request_hash)  # placed before any closing: still answered
+
+    store.ensure_open()  # 409 STORE_CLOSED while the hotel has online orders switched off
 
     slot_id, start_hour = _check_slot(request["delivery_date"], request["slot_label"], now)
     snapshot = _address_snapshot(claims, request["address_id"])
@@ -63,19 +80,5 @@ def create_order(event: dict) -> dict:
             **_key(user_id, f"ORDER#{order_id}"),
             "entity": "ORDER",
             "id": order_id,
-            "order_number": _next_order_number(now),
-            "user_id": user_id,
-            "address_snapshot": snapshot,
-            "delivery_date": request["delivery_date"],
-            "slot_label": request["slot_label"],
-            "slot_id": slot_id,
-            "slot_start_hour": start_hour,
-            "status": status,  # COD: CONFIRMED; UPI: PENDING_PAYMENT until the kitchen sees the money
-            **bill,
-            "payment_method": request["payment_method"],
-            "payment_status": "pending",
-            "created_at": created_at,
-            "updated_at": created_at,
-            "items": lines,
 PYSRC
 }

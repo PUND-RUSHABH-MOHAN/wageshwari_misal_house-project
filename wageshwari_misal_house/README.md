@@ -193,6 +193,7 @@ or *Maps SDK for Android* isn't enabled.
 | Login | `login()` | `POST /auth/login` (email) · `POST /auth/otp/verify` (phone) | `AppContext.tsx` → `LOGIN` |
 | Profile | `logout()` | `POST /auth/logout` | `AppContext.tsx` → `LOGOUT` |
 | Home | initial data | `GET /categories`, `GET /products` | **live** (`AppContext` → `loadCatalog`) |
+| Home / Cart | store open? | `GET /store` (at start, on focus, when the app comes back) | **live** (`AppContext` → `loadStore`) |
 | Profile | current user | `GET /me` | **live** (restored at startup) |
 | Profile | `updateUser()` | `PATCH /me` | `AppContext.tsx` → `UPDATE_USER` |
 | Profile / Cart | addresses list | `GET /addresses` | **live** (`AppContext` → `loadAddresses`) |
@@ -206,6 +207,7 @@ or *Maps SDK for Android* isn't enabled.
 | Pay (UPI) | `submitPayment()` | `POST /orders/:id/payment` `{utr}` | **live** (`src/app/pay/[id].tsx`) |
 | Kitchen (admins) | order board | `GET /admin/orders?date=` | **live** (`src/app/(tabs)/kitchen.tsx`) |
 | Kitchen (admins) | next step / cancel | `POST /admin/orders/:id/status` | **live** |
+| Kitchen (admins) | "Taking online orders" switch | `PATCH /admin/store` `{accepting_orders, message?}` | **live** (`AppContext` → `setAcceptingOrders`) |
 | Manage menu (admins) | lists | `GET /admin/categories`, `GET /admin/products` | **live** (`src/app/admin-menu.tsx`) |
 | Manage menu (admins) | add / edit | `POST`/`PATCH /admin/categories`, `POST`/`PATCH /admin/products` | **live** |
 
@@ -310,6 +312,17 @@ other categories, widen the `CategoryName` type in `src/types/index.ts`.
   bundled for that product `id` (`PRODUCT_IMAGES` in `mock-data.ts`) is shown. If neither
   exists, a 🍽️ placeholder is shown.
 
+**`GET /store`** (public, not cached) says whether the hotel is taking online orders:
+
+```json
+{ "accepting_orders": false, "message": "Hotel is closed today.", "opens_at": "09:00", "closes_at": "21:00" }
+```
+
+- `message` is `""` while open. While closed, Home and Cart show it in a red banner and
+  Place Order is disabled.
+- If an order is attempted anyway, `POST /orders` answers `409 STORE_CLOSED` with the same
+  message; the app then re-reads `GET /store`.
+
 ### 5.4 Cart screen → place order
 
 The bill is calculated in the app (`src/utils/pricing.ts`). The backend should use
@@ -330,7 +343,7 @@ cart lives on the device:
 {
   "address_id": "adr_01",
   "delivery_date": "2026-11-13",
-  "slot_label": "Morning 8:00 - 9:00 AM",
+  "slot_label": "Morning 10:00 - 11:00 AM",
   "payment_method": "cod",
   "items": [
     { "product_id": "prd_misal_pav", "quantity": 2, "spice_level": "teekha", "note": "Less onion" },
@@ -375,7 +388,7 @@ Response: the created **Order** (see 5.5). Full rules and error codes: `backend/
     "is_default": true
   },
   "delivery_date": "2026-11-13",
-  "slot_label": "Morning 8:00 - 9:00 AM",
+  "slot_label": "Morning 10:00 - 11:00 AM",
   "status": "CONFIRMED",
   "subtotal": 21000,
   "delivery_fee": 3000,
@@ -454,8 +467,9 @@ and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and 
 
 | Rule | Value | File |
 |---|---|---|
-| Kitchen hours | 7:00 AM – 2:00 PM (shows OPEN / CLOSED; orders are still allowed as pre-orders) | `src/utils/pricing.ts` |
-| Delivery slots | Early Bird 7–8, Morning 8–9, Breakfast 9–10, Brunch 10–11, Lunch 12–1 | `src/utils/pricing.ts` |
+| Delivery hours | 9:00 AM – 9:00 PM (shows OPEN / CLOSED; outside these hours orders are pre-orders) | `src/utils/pricing.ts`, `src/constants/shop.ts` |
+| Delivery slots | 12 one-hour slots: Morning 9–10, 10–11, 11–12 · Afternoon 12–1 … 4–5 · Evening 5–6 … 8–9. Labels must match `SLOTS` in `backend/src/orders.py` exactly | `src/utils/pricing.ts` |
+| Online orders switch | Admins can stop all new orders (today and tomorrow) from the Kitchen tab, with an optional message. Stays off until an admin turns it back on. Home and Cart show a red banner and Place Order is disabled; the server refuses with `409 STORE_CLOSED` | `kitchen.tsx`, `StopOrdersSheet.tsx`, enforced by `backend/src/store.py` |
 | Same-day slot cut-off | A slot closes 30 minutes before it starts | `src/utils/pricing.ts` |
 | Delivery fee / GST | ₹30 flat / 5% | `src/utils/pricing.ts` |
 | Minimum order | ₹100 of food (before delivery and GST) | `src/utils/pricing.ts`, enforced by `backend/src/orders.py` |

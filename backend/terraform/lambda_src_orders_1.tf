@@ -22,8 +22,9 @@ Rules (the app shows the same ones; the server's answer is final)
     The customer pays in their UPI app and sends the 12-digit UTR; the kitchen checks its UPI app
     and confirms (admin.py). There's no gateway, so nothing confirms payments automatically.
     Unpaid UPI orders without a UTR are cancelled after PAYMENT_WINDOW_MINUTES (expire.py).
-  - Delivery date: today or tomorrow in India time (IST, fixed +05:30). A slot for today
-    closes 30 minutes before it starts.
+  - Delivery date: today or tomorrow in India time (IST, fixed +05:30). One-hour slots from
+    9:00 AM to 9:00 PM; a slot for today closes 30 minutes before it starts.
+  - The hotel can switch online orders off (store.py): new orders get 409 STORE_CLOSED.
   - The address must be the user's and still inside the delivery area.
   - Cancel only while CONFIRMED / PENDING_PAYMENT (before the kitchen starts), and not once a UPI
     payment has been reported (UTR sent): that needs a refund, so the hotel handles it.
@@ -54,10 +55,6 @@ from urllib.parse import quote
 
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-
-import addresses
-import users
-from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response
 
 PYSRC
 }

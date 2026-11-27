@@ -5,6 +5,8 @@
 #   PK = "USER#<cognito sub>", SK = "IDEMP#<key>"   "no double orders" records (part 5, expire)
 #   PK = "COUNTER",            SK = "ORDER#<date>"  daily order-number counter (part 5)
 #   PK = "ORDERREF#<id>",      SK = "ORDER"         which user an order belongs to (part 6)
+#   PK = "UTR#<utr>",          SK = "UTR"           which order a UPI reference was used for (part 7)
+#   PK = "SETTINGS",           SK = "STORE"         online orders on/off switch (part 7b)
 #   PK = "CATALOG",            SK = "CATEGORY#/PRODUCT#<id>"  the menu (part 3)
 #
 # GSI1 (part 6): the kitchen's order board. Only orders carry GSI1PK/GSI1SK, so only orders are

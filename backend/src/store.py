@@ -1,0 +1,59 @@
+"""The hotel's online-ordering switch and opening hours (part 7b).
+
+One row in the table: PK = "SETTINGS", SK = "STORE"
+  accepting_orders  bool   False = no new orders (today or tomorrow) until an admin turns it back on
+  message           str    shown to customers while closed (optional)
+  updated_at / updated_by
+
+No row yet = open. Orders already placed are never touched by the switch.
+Used by catalog.py (GET /store, public), orders.py (POST /orders refuses with 409 STORE_CLOSED)
+and admin.py (PATCH /admin/store).
+"""
+
+from __future__ import annotations
+
+import users
+from common import ApiError
+
+KEY = {"PK": "SETTINGS", "SK": "STORE"}
+
+# Delivery hours (IST). Keep in step with orders.SLOTS and the app's DELIVERY_SLOTS.
+OPEN_HOUR = 9  # first slot starts 9:00 AM
+CLOSE_HOUR = 21  # last slot ends 9:00 PM
+MESSAGE_MAX = 120
+DEFAULT_CLOSED_MESSAGE = "We're not taking online orders right now. Please check back later."
+
+
+def get_settings() -> dict:
+    return users.table().get_item(Key=KEY, ConsistentRead=True).get("Item") or {}
+
+
+def to_store(item: dict) -> dict:
+    """Settings row -> the app's `StoreStatus`."""
+    accepting = bool(item.get("accepting_orders", True))
+    return {
+        "accepting_orders": accepting,
+        "message": "" if accepting else (item.get("message") or DEFAULT_CLOSED_MESSAGE),
+        "opens_at": f"{OPEN_HOUR:02d}:00",
+        "closes_at": f"{CLOSE_HOUR:02d}:00",
+    }
+
+
+def ensure_open() -> None:
+    """Raise 409 STORE_CLOSED (with the hotel's message) if online orders are switched off."""
+    status = to_store(get_settings())
+    if not status["accepting_orders"]:
+        raise ApiError(409, "STORE_CLOSED", status["message"])
+
+
+def set_accepting(accepting: bool, message: str, by: str, now: str) -> dict:
+    item = {
+        **KEY,
+        "entity": "SETTINGS",
+        "accepting_orders": accepting,
+        "message": "" if accepting else message,  # re-opening clears the closed message
+        "updated_at": now,
+        "updated_by": by,
+    }
+    users.table().put_item(Item=item)
+    return item

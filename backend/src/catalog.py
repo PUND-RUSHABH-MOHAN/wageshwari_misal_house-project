@@ -1,9 +1,10 @@
-"""Catalog Lambda: the menu. Both routes are public (no login needed).
+"""Catalog Lambda: the menu and the store status. All routes are public (no login needed).
 
 Routes
   GET /categories   active categories, by sort_order        -> Category[]
   GET /products     every visible product, sold-out ones included   -> Product[]
                     (dishes hidden by the kitchen, is_active = false, are left out)
+  GET /store        is the hotel taking online orders? + hours (part 7b) -> StoreStatus
 
 Storage (single table, one partition for the whole menu):
   PK = "CATALOG", SK = "CATEGORY#<id>"   a category
@@ -15,6 +16,7 @@ from __future__ import annotations
 import boto3
 from boto3.dynamodb.conditions import Key
 
+import store
 from common import dispatch, env, response
 
 CATALOG_PK = "CATALOG"
@@ -89,9 +91,15 @@ def get_products(event: dict) -> dict:  # noqa: ARG001 - route signature
     return response(200, products, CACHE_HEADERS)
 
 
+def get_store(event: dict) -> dict:  # noqa: ARG001 - route signature
+    # Not cached: when the hotel switches orders off, phones should see it at once.
+    return response(200, store.to_store(store.get_settings()), {"Cache-Control": "no-store"})
+
+
 ROUTES = {
     "GET /categories": get_categories,
     "GET /products": get_products,
+    "GET /store": get_store,
 }
 
 

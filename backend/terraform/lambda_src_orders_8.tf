@@ -2,6 +2,20 @@
 
 locals {
   lambda_src_orders_8 = <<PYSRC
+            "order_number": _next_order_number(now),
+            "user_id": user_id,
+            "address_snapshot": snapshot,
+            "delivery_date": request["delivery_date"],
+            "slot_label": request["slot_label"],
+            "slot_id": slot_id,
+            "slot_start_hour": start_hour,
+            "status": status,  # COD: CONFIRMED; UPI: PENDING_PAYMENT until the kitchen sees the money
+            **bill,
+            "payment_method": request["payment_method"],
+            "payment_status": "pending",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "items": lines,
             "status_history": [history_entry(status, created_at, "customer")],
             **({"payment_expires_at": _iso(now + payment_window())} if upi else {}),
             # Index GSI1: the kitchen's "all orders for a delivery date, by slot" (admin.py).
@@ -57,16 +71,5 @@ def cancel_order(event: dict) -> dict:
         updated = users.table().update_item(
             Key=_key(user_id, f"ORDER#{current['id']}"),
             UpdateExpression=(
-                "SET #s = :cancelled, cancelled_at = :now, updated_at = :now, cancelled_by = :by, "
-                "status_history = list_append(if_not_exists(status_history, :empty), :entry)"
-            ),
-            # Not once the kitchen started, and not after a UPI payment was reported (needs a refund).
-            ConditionExpression="#s IN (:pending, :confirmed) AND attribute_not_exists(utr)",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":cancelled": "CANCELLED",
-                ":now": now,
-                ":pending": CANCELLABLE[0],
-                ":confirmed": CANCELLABLE[1],
 PYSRC
 }

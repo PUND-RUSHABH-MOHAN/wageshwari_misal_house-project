@@ -2,6 +2,21 @@
 
 locals {
   lambda_src_orders_3 = <<PYSRC
+        or item.get("payment_method") != "online"
+        or item.get("status") != "PENDING_PAYMENT"
+        or item.get("payment_status") == "paid"
+    ):
+        return None
+    amount = amount_text(int(item["total"]))
+    number = item["order_number"]
+    # NPCI deep-link format; the same string is shown as a QR code in the app.
+    uri = (
+        f"upi://pay?pa={quote(vpa, safe='@.')}&pn={quote(name)}&am={amount}&cu=INR"
+        f"&tn={quote('Order ' + number)}&tr={quote(number)}"
+    )
+    return {"upi_id": vpa, "payee_name": name, "amount": amount, "note": f"Order {number}", "uri": uri}
+
+
 def rupees(paise: int) -> str:
     return f"₹{paise // 100}" if paise % 100 == 0 else f"₹{paise / 100:.2f}"
 
@@ -58,13 +73,5 @@ def _clean_items(raw: Any) -> list[dict]:
             raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s) in `{where}`: {', '.join(unknown)}.")
         product_id = line.get("product_id")
         if not isinstance(product_id, str) or not _PRODUCT_ID_RE.match(product_id):
-            raise ApiError(400, "VALIDATION_ERROR", f"`{where}.product_id` is required.")
-        qty = line.get("quantity")
-        if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= MAX_QUANTITY:
-            raise ApiError(400, "VALIDATION_ERROR", f"`{where}.quantity` must be a whole number from 1 to {MAX_QUANTITY}.")
-        item: dict = {"product_id": product_id, "quantity": qty}
-        spice = line.get("spice_level")
-        if spice is not None:
-            if spice not in SPICE_LEVELS:
 PYSRC
 }

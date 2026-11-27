@@ -13,6 +13,8 @@ Routes
   GET   /admin/products                 all dishes, hidden ones too             -> AdminProduct[]
   POST  /admin/products                 new dish                                -> 201 AdminProduct
   PATCH /admin/products/{id}            price, names, sold out, hide, ...       -> AdminProduct
+  PATCH /admin/store                    {accepting_orders, message?}: stop / restart online
+                                         orders (part 7b)                       -> AdminStore
 
 Order status rules
   - One step forward at a time: CONFIRMED -> PREPARING -> OUT_FOR_DELIVERY -> DELIVERED.
@@ -43,6 +45,7 @@ from botocore.exceptions import ClientError
 
 import catalog
 import orders
+import store
 import users
 from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response, role_from_claims
 
@@ -428,7 +431,29 @@ def update_product(event: dict) -> dict:
     return response(200, to_admin_product(_update_catalog_item("PRODUCT", current["id"], fields)))
 
 
+# ---------------------------------------------------------------------------
+# Store switch (part 7b)
+# ---------------------------------------------------------------------------
+def to_admin_store(item: dict) -> dict:
+    return {**store.to_store(item), "updated_at": item.get("updated_at"), "updated_by": item.get("updated_by")}
+
+
+def update_store(event: dict) -> dict:
+    claims = _admin(event)
+    body = parse_body(event)
+    unknown = sorted(set(body) - {"accepting_orders", "message"})
+    if unknown:
+        raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s): {', '.join(unknown)}.")
+    accepting = body.get("accepting_orders")
+    if not isinstance(accepting, bool):
+        raise ApiError(400, "VALIDATION_ERROR", "`accepting_orders` must be true or false.")
+    message = _text(body, "message", required=False, max_len=store.MESSAGE_MAX) or ""
+    item = store.set_accepting(accepting, message, claims.get("email") or claims["sub"], _now())
+    return response(200, to_admin_store(item))
+
+
 ROUTES = {
+    "PATCH /admin/store": update_store,
     "GET /admin/orders": list_orders,
     "POST /admin/orders/{id}/status": change_status,
     "GET /admin/categories": list_categories,

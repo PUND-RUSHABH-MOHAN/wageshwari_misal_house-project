@@ -1,5 +1,5 @@
-import { router } from 'expo-router';
-import { useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -43,8 +43,27 @@ const PAYMENT_OPTIONS: { method: PaymentMethod; title: string; hint: string; ico
 ];
 
 export default function CartScreen() {
-  const { cart, bill, cartCount, selectedAddress, changeQuantity, updateCartItem, clearCart, placeOrder } =
-    useApp();
+  const {
+    cart,
+    bill,
+    cartCount,
+    selectedAddress,
+    changeQuantity,
+    updateCartItem,
+    clearCart,
+    placeOrder,
+    store,
+    storeOpen,
+    reloadStore,
+  } = useApp();
+
+  // Re-check whether the hotel is taking online orders each time the cart comes into view.
+  useFocusEffect(
+    useCallback(() => {
+      reloadStore();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+  );
 
   const now = new Date();
   const todayHasSlots = DELIVERY_SLOTS.some((s) => isSlotAvailable(s, true, now));
@@ -83,9 +102,14 @@ export default function CartScreen() {
 
   const shortBy = shortOfMinimum(bill);
   const soldOut = cart.filter((c) => !c.product.is_available);
+  const closedMessage = store?.message || "We're not taking online orders right now.";
 
   const handlePlaceOrder = async () => {
     if (placing) return;
+    if (!storeOpen) {
+      setError(closedMessage);
+      return;
+    }
     if (!selectedAddress) {
       setError('Please add a delivery address.');
       setAddressOpen(true);
@@ -138,6 +162,17 @@ export default function CartScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll}>
+        {!storeOpen ? (
+          // The hotel switched online orders off; the cart is kept for when it re-opens.
+          <View style={styles.closedBanner}>
+            <Icon name="store" size={18} color={Colors.danger} />
+            <View style={styles.flex}>
+              <Text style={styles.closedTitle}>Online orders are paused</Text>
+              <Text style={styles.closedText}>{closedMessage}</Text>
+            </View>
+          </View>
+        ) : null}
+
         {/* Items */}
         <Card style={styles.itemsCard}>
           {cart.map((item, idx) => (
@@ -225,21 +260,18 @@ export default function CartScreen() {
               style={styles.flex}
             />
           </View>
+          {/* One-hour slots, 9 AM – 9 PM; today's past slots are left out. */}
           <View style={styles.slotGrid}>
-            {DELIVERY_SLOTS.map((slot) => {
-              const available = availableSlots.includes(slot);
-              return (
-                <Pill
-                  key={slot.id}
-                  label={slot.name}
-                  sublabel={slot.time}
-                  selected={selectedSlot?.id === slot.id}
-                  disabled={!available}
-                  onPress={() => setSlotId(slot.id)}
-                  style={styles.slotPill}
-                />
-              );
-            })}
+            {availableSlots.map((slot) => (
+              <Pill
+                key={slot.id}
+                label={slot.name}
+                sublabel={slot.time}
+                selected={selectedSlot?.id === slot.id}
+                onPress={() => setSlotId(slot.id)}
+                style={styles.slotPill}
+              />
+            ))}
           </View>
         </Card>
 
@@ -305,18 +337,20 @@ export default function CartScreen() {
           <View>
             <Text style={styles.footerTotal}>{formatCurrency(bill.total)}</Text>
             <Text style={styles.footerHint}>
-              {shortBy > 0
-                ? `Add ${formatCurrency(shortBy)} more`
-                : payment === 'cod'
-                  ? 'Pay on delivery'
-                  : 'Pay by UPI next'}
+              {!storeOpen
+                ? 'Online orders paused'
+                : shortBy > 0
+                  ? `Add ${formatCurrency(shortBy)} more`
+                  : payment === 'cod'
+                    ? 'Pay on delivery'
+                    : 'Pay by UPI next'}
             </Text>
           </View>
           <Button
             title="Place Order"
             onPress={handlePlaceOrder}
             loading={placing}
-            disabled={!selectedSlot || shortBy > 0 || soldOut.length > 0}
+            disabled={!storeOpen || !selectedSlot || shortBy > 0 || soldOut.length > 0}
             style={styles.placeBtn}
           />
         </View>
@@ -354,6 +388,17 @@ const styles = StyleSheet.create({
   title: { fontFamily: Fonts.extrabold, fontSize: 26, lineHeight: 34, color: Colors.text },
   subtitle: { fontSize: 13, color: Colors.textMuted },
   scroll: { padding: Spacing.lg, gap: Spacing.lg, paddingBottom: Spacing.xxl },
+
+  closedBanner: {
+    flexDirection: 'row',
+    gap: Spacing.md,
+    alignItems: 'flex-start',
+    backgroundColor: Colors.dangerSoft,
+    padding: Spacing.md,
+    borderRadius: Radius.md,
+  },
+  closedTitle: { fontSize: 14, fontWeight: '800', color: Colors.danger },
+  closedText: { fontSize: 13, color: Colors.danger, marginTop: 2, lineHeight: 18 },
 
   itemsCard: { paddingVertical: Spacing.sm },
   itemRow: { flexDirection: 'row', gap: Spacing.md, paddingVertical: Spacing.md },

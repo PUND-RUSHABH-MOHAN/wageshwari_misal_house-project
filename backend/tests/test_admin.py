@@ -75,7 +75,7 @@ def test_list_orders_for_a_day_by_slot(env):
     _, tomorrow, _ = place(a, ALICE, key="board-key-3", delivery_date=TOMORROW)
     status, board, _ = adm("GET /admin/orders")  # default = today in IST
     assert status == 200
-    assert [o["id"] for o in board] == [early["id"], morning["id"]]  # Early Bird slot first
+    assert [o["id"] for o in board] == [early["id"], morning["id"]]  # the 9 AM slot first
     assert board[0]["address_snapshot"]["receiver_phone"] == "9876543210"
     assert board[0]["status_history"][0]["status"] == "CONFIRMED"
     _, next_day, _ = adm("GET /admin/orders", query={"date": TOMORROW})

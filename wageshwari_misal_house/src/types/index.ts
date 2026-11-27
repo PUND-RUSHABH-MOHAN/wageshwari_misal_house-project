@@ -220,3 +220,23 @@ export interface AdminOrder extends Order {
 export interface AdminProduct extends Product {
   is_active: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// store switch (part 7b): GET /store, PATCH /admin/store
+// ---------------------------------------------------------------------------
+/** Is the hotel taking online orders right now? */
+export interface StoreStatus {
+  accepting_orders: boolean;
+  /** Shown to customers while closed ("" when open). */
+  message: string;
+  /** "09:00" (IST) */
+  opens_at: string;
+  /** "21:00" (IST) */
+  closes_at: string;
+}
+
+/** What PATCH /admin/store returns: the status plus who changed it last. */
+export interface AdminStore extends StoreStatus {
+  updated_at?: string | null;
+  updated_by?: string | null;
+}

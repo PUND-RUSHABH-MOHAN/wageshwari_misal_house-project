@@ -198,7 +198,7 @@ def test_cod_cannot_be_payment_confirmed_twice(upi):
 # ---------------------------------------------------------------- auto-expiry
 def test_expire_cancels_only_overdue_unpaid(upi):
     unpaid = upi_order(ALICE, key="exp-key-1")
-    with_utr = upi_order(ALICE, key="exp-key-2", slot_label="Lunch 12:00 - 1:00 PM")
+    with_utr = upi_order(ALICE, key="exp-key-2", slot_label="Afternoon 12:00 - 1:00 PM")
     pay(with_utr["id"])
     adr = make_address(BOB)
     _, cod, _ = place(adr, BOB, key="exp-key-3", delivery_date=TOMORROW)

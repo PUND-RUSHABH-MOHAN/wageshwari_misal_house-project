@@ -2,6 +2,14 @@
 
 locals {
   lambda_src_orders_4 = <<PYSRC
+            raise ApiError(400, "VALIDATION_ERROR", f"`{where}.product_id` is required.")
+        qty = line.get("quantity")
+        if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= MAX_QUANTITY:
+            raise ApiError(400, "VALIDATION_ERROR", f"`{where}.quantity` must be a whole number from 1 to {MAX_QUANTITY}.")
+        item: dict = {"product_id": product_id, "quantity": qty}
+        spice = line.get("spice_level")
+        if spice is not None:
+            if spice not in SPICE_LEVELS:
                 raise ApiError(400, "VALIDATION_ERROR", f"`{where}.spice_level` must be mild, medium or teekha.")
             item["spice_level"] = spice
         note = line.get("note")
@@ -55,15 +63,5 @@ def _request_hash(request: dict) -> str:
     return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Business rules
-# ---------------------------------------------------------------------------
-def _check_slot(delivery_date: str, slot_label: str, now: datetime) -> tuple[str, int]:
-    now_ist = now.astimezone(IST)
-    today = now_ist.date()
-    day = date.fromisoformat(delivery_date)
-    if day not in (today, today + timedelta(days=1)):
-        raise ApiError(409, "SLOT_UNAVAILABLE", "Delivery can be booked for today or tomorrow only.")
-    slot_id, start_hour = SLOTS_BY_LABEL[slot_label]
 PYSRC
 }
