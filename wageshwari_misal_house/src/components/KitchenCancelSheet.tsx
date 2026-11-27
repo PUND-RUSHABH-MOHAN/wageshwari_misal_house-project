@@ -8,6 +8,7 @@ import { Colors, Spacing } from '@/constants/theme';
 import type { AdminOrder } from '@/types';
 
 const QUICK_REASONS = [
+  'Payment not received',
   'Out of stock today',
   'Kitchen closed',
   "Couldn't reach the customer",

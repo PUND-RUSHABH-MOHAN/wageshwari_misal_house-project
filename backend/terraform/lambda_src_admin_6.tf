@@ -2,6 +2,25 @@
 
 locals {
   lambda_src_admin_6 = <<PYSRC
+        b, "price", MIN_PRICE_PAISE, MAX_PRICE_PAISE, "`price` must be whole paise from 100 (₹1) to 500000 (₹5,000)."
+    ),
+    "image_url": _image_url,
+    "is_veg": lambda b: _bool(b, "is_veg"),
+    "has_spice_level": lambda b: _bool(b, "has_spice_level"),
+    "is_available": lambda b: _bool(b, "is_available"),
+    "is_active": lambda b: _bool(b, "is_active"),
+}
+
+
+def to_admin_product(item: dict) -> dict:
+    return {**catalog.to_product(item), "is_active": bool(item.get("is_active", True))}
+
+
+def _check_category(category_id: str) -> dict:
+    return _get_catalog_item("CATEGORY", category_id, "Category")
+
+
+def list_products(event: dict) -> dict:
     _admin(event)
     out = [to_admin_product(i) for i in _all("PRODUCT")]
     out.sort(key=lambda p: (p["category_id"], p["name"]))

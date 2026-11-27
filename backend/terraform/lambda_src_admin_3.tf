@@ -2,6 +2,14 @@
 
 locals {
   lambda_src_admin_3 = <<PYSRC
+        "status_history = list_append(if_not_exists(status_history, :empty), :entry)",
+    ]
+
+    if new == "CANCELLED":
+        if current not in KITCHEN_CANCELLABLE:
+            raise ApiError(409, "INVALID_STATUS_CHANGE", f"A {current.lower().replace('_', ' ')} order can't be cancelled.")
+        reason = body.get("reason")
+        reason = " ".join(reason.split()) if isinstance(reason, str) else ""
         if not 3 <= len(reason) <= 120:
             raise ApiError(400, "VALIDATION_ERROR", "Give the customer a short reason (3–120 characters).")
         values.update({":reason": reason, ":kitchen": "kitchen"})
@@ -11,6 +19,9 @@ locals {
             expected = NEXT_STATUS.get(current)
             hint = f" The next step is {expected}." if expected else ""
             raise ApiError(409, "INVALID_STATUS_CHANGE", f"This order is {current}; it can't go to {new}.{hint}")
+        if new == "CONFIRMED":  # from PENDING_PAYMENT: the UPI money is in
+            sets += ["payment_status = :paid", "payment_verified_at = :now", "payment_verified_by = :by"]
+            values.update({":paid": "paid", ":by": by})
         if new == "DELIVERED":
             sets.append("delivered_at = :now")
             if order.get("payment_method") == "cod":
@@ -52,25 +63,5 @@ def _text(body: dict, field: str, *, required: bool, max_len: int) -> str | None
     if len(value) > max_len:
         raise ApiError(400, "VALIDATION_ERROR", f"`{field}` must be at most {max_len} characters.")
     return value
-
-
-def _bool(body: dict, field: str) -> bool | None:
-    if field not in body:
-        return None
-    if not isinstance(body[field], bool):
-        raise ApiError(400, "VALIDATION_ERROR", f"`{field}` must be true or false.")
-    return body[field]
-
-
-def _int(body: dict, field: str, low: int, high: int, message: str) -> int | None:
-    if field not in body:
-        return None
-    value = body[field]
-    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-        raise ApiError(400, "VALIDATION_ERROR", message)
-    return value
-
-
-def _image_url(body: dict) -> str | None:
 PYSRC
 }

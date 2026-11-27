@@ -1,3 +1,4 @@
+import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Icon, type IconName } from '@/components/Icon';
@@ -49,14 +50,19 @@ const RANK: Record<OrderStatus, number> = {
   CANCELLED: -2,
 };
 
-export function OrderTimeline({ status, cancelReason }: { status: OrderStatus; cancelReason?: string }) {
+export function OrderTimeline({ order }: { order: Order }) {
+  const { status } = order;
   if (status === 'CANCELLED') {
+    const text =
+      order.cancelled_by === 'kitchen' && order.cancel_reason
+        ? `The kitchen cancelled this order: ${order.cancel_reason}`
+        : order.cancelled_by === 'system' && order.cancel_reason
+          ? `Cancelled: ${order.cancel_reason}`
+          : 'This order was cancelled.';
     return (
       <View style={[styles.notice, { backgroundColor: Colors.dangerSoft }]}>
         <Icon name="close" size={16} color={Colors.danger} />
-        <Text style={[styles.noticeText, { color: Colors.danger }]}>
-          {cancelReason ? `The kitchen cancelled this order: ${cancelReason}` : 'This order was cancelled.'}
-        </Text>
+        <Text style={[styles.noticeText, { color: Colors.danger }]}>{text}</Text>
       </View>
     );
   }
@@ -67,7 +73,9 @@ export function OrderTimeline({ status, cancelReason }: { status: OrderStatus; c
         <View style={[styles.notice, { backgroundColor: Colors.warningSoft, marginBottom: Spacing.md }]}>
           <Icon name="clock" size={16} color={Colors.warning} />
           <Text style={[styles.noticeText, { color: Colors.warning }]}>
-            Waiting for UPI payment confirmation…
+            {order.payment_status === 'submitted'
+              ? `The hotel is checking your UPI payment (UTR ${order.utr}).`
+              : 'Waiting for your UPI payment.'}
           </Text>
         </View>
       ) : null}
@@ -148,12 +156,22 @@ export function OrderCard({
         </View>
       </Pressable>
 
+      {/* UPI order not paid yet: straight to the Pay screen */}
+      {order.status === 'PENDING_PAYMENT' && order.payment_status === 'pending' && order.upi_payment ? (
+        <Button
+          title={`Pay ${formatCurrency(order.total)} now`}
+          icon="upi"
+          onPress={() => router.push({ pathname: '/pay/[id]', params: { id: order.id } })}
+          style={styles.payNow}
+        />
+      ) : null}
+
       {expanded ? (
         <View style={styles.receipt}>
           <View style={styles.divider} />
 
           <Text style={styles.blockTitle}>Order status</Text>
-          <OrderTimeline status={order.status} cancelReason={order.cancel_reason} />
+          <OrderTimeline order={order} />
 
           <View style={styles.divider} />
           <Text style={styles.blockTitle}>Delivery</Text>
@@ -201,14 +219,18 @@ export function OrderCard({
           <View style={styles.payRow}>
             <Icon name={order.payment_method === 'cod' ? 'cash' : 'upi'} size={16} color={Colors.textMuted} />
             <Text style={styles.meta}>
-              {order.payment_method === 'cod' ? 'Cash on Delivery' : 'UPI / Online'} ·{' '}
+              {order.payment_method === 'cod' ? 'Cash on Delivery' : 'UPI'} ·{' '}
             </Text>
             <Text
               style={[
                 styles.meta,
                 { fontWeight: '800', color: order.payment_status === 'paid' ? Colors.success : Colors.warning },
               ]}>
-              {order.payment_status === 'paid' ? 'PAID' : 'PAYMENT PENDING'}
+              {order.payment_status === 'paid'
+                ? 'PAID'
+                : order.payment_status === 'submitted'
+                  ? 'BEING CHECKED'
+                  : 'PAYMENT PENDING'}
             </Text>
           </View>
 
@@ -293,6 +315,7 @@ const styles = StyleSheet.create({
   billStrong: { fontSize: 16, fontWeight: '800', color: Colors.text },
   payRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: Spacing.xs },
   cancelBtn: { marginTop: Spacing.md },
+  payNow: { marginTop: Spacing.md },
 
   notice: {
     flexDirection: 'row',

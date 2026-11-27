@@ -24,6 +24,7 @@ locals {
     "GET /orders"                = { fn = "orders", auth = true }
     "GET /orders/{id}"           = { fn = "orders", auth = true }
     "POST /orders/{id}/cancel"   = { fn = "orders", auth = true }
+    "POST /orders/{id}/payment"  = { fn = "orders", auth = true }
     # Admin: the JWT authorizer checks the login; admin.py checks the `admin` group (403 otherwise).
     "GET /admin/orders"              = { fn = "admin", auth = true }
     "POST /admin/orders/{id}/status" = { fn = "admin", auth = true }
@@ -57,7 +58,7 @@ resource "aws_apigatewayv2_authorizer" "cognito" {
 }
 
 resource "aws_apigatewayv2_integration" "fn" {
-  for_each               = local.functions
+  for_each               = local.api_functions
   api_id                 = aws_apigatewayv2_api.http.id
   integration_type       = "AWS_PROXY"
   integration_uri        = aws_lambda_function.fn[each.key].invoke_arn

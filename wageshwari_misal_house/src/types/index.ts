@@ -111,7 +111,18 @@ export type OrderStatus =
   | 'CANCELLED';
 
 export type PaymentMethod = 'cod' | 'online';
-export type PaymentStatus = 'pending' | 'paid';
+/** UPI: pending -> submitted (customer sent a UTR) -> paid (kitchen checked). COD: pending -> paid on delivery. */
+export type PaymentStatus = 'pending' | 'submitted' | 'paid';
+
+/** What the app needs to pay a UPI order (part 7). `uri` opens the UPI app and is the QR content. */
+export interface UpiPayment {
+  upi_id: string;
+  payee_name: string;
+  /** Rupees, e.g. "250.50" */
+  amount: string;
+  note: string;
+  uri: string;
+}
 
 export interface OrderItem {
   id: ID;
@@ -145,10 +156,16 @@ export interface Order {
   total: Paise;
   payment_method: PaymentMethod;
   payment_status: PaymentStatus;
-  /** Only on cancelled orders: who cancelled it. */
-  cancelled_by?: 'customer' | 'kitchen';
-  /** Only when the kitchen cancelled: the reason shown to the customer. */
+  /** Only on cancelled orders: who cancelled it ('system' = unpaid UPI order expired). */
+  cancelled_by?: 'customer' | 'kitchen' | 'system';
+  /** Kitchen / system cancels: the reason shown to the customer. */
   cancel_reason?: string;
+  /** UPI orders: the 12-digit reference the customer sent after paying. */
+  utr?: string;
+  /** UPI orders: pay (send a UTR) by this ISO time, or the order is cancelled. */
+  payment_expires_at?: string;
+  /** UPI orders still waiting for payment: how to pay. */
+  upi_payment?: UpiPayment;
   /** ISO timestamp — standard created_at column. */
   created_at: string;
   /** Joined order_items rows (GET /orders/:id?include=items). */

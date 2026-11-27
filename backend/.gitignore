@@ -14,3 +14,8 @@ __pycache__/
 
 # Old SAM build output, if a local copy is ever merged in
 .aws-sam/
+
+# Private settings (e.g. the UPI ID, which contains a phone number). Kept only in the
+# Terraform workspace; see README "UPI settings".
+terraform/*.auto.tfvars
+terraform/terraform.tfvars

@@ -130,8 +130,9 @@ const sameLine = (a: CartItem, b: CartItem) =>
   (a.note ?? '').trim() === (b.note ?? '').trim();
 
 export const isTerminalStatus = (s: OrderStatus) => s === 'DELIVERED' || s === 'CANCELLED';
-/** Same rule as the server: cancel only before the kitchen starts. */
-export const isCancellable = (o: Order) => o.status === 'PENDING_PAYMENT' || o.status === 'CONFIRMED';
+/** Same rule as the server: before the kitchen starts, and not after a UPI payment was reported. */
+export const isCancellable = (o: Order) =>
+  (o.status === 'PENDING_PAYMENT' || o.status === 'CONFIRMED') && !o.utr;
 
 /** A random Idempotency-Key for one checkout (8–64 of A-Z a-z 0-9 _ -). */
 const newCheckoutKey = () =>
@@ -362,6 +363,8 @@ interface AppContextValue {
   placeOrder: (input: PlaceOrderInput) => Promise<Order>;
   /** POST /orders/:id/cancel. */
   cancelOrder: (orderId: ID) => Promise<void>;
+  /** POST /orders/:id/payment: "I've paid by UPI" with the UTR. */
+  submitPayment: (orderId: ID, utr: string) => Promise<Order>;
   dismissOrderBanner: () => void;
   // addresses (the async ones throw ApiError; screens show `error.message`)
   /** POST /addresses (no id) or PATCH /addresses/:id. A new address is selected for checkout. */
@@ -627,6 +630,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (isApiError(e) && e.code === 'PRODUCT_UNAVAILABLE') loadCatalog();
         throw e;
       }
+    },
+    submitPayment: async (id, utr) => {
+      const order = await withAuth((t) => orderApi.submitPayment(t, id, utr)); // POST /orders/:id/payment
+      dispatch({ type: 'ORDER_UPDATED', order });
+      return order;
     },
     cancelOrder: async (id) => {
       try {

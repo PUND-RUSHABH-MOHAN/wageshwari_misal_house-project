@@ -277,7 +277,7 @@ def test_minimum_order_100_rupees(env):
     assert status == 201 and o["subtotal"] == 10000
 
 
-def test_online_payment_refused_for_now(env):
+def test_online_payment_refused_when_upi_not_set_up(env):
     adr = make_address()
     status, out, _ = place(adr, payment_method="online")
     assert status == 400 and error_code(out) == "PAYMENT_METHOD_UNAVAILABLE"

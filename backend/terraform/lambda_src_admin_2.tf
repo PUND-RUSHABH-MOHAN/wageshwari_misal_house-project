@@ -2,6 +2,20 @@
 
 locals {
   lambda_src_admin_2 = <<PYSRC
+    if role_from_claims(claims) != "admin":
+        raise ApiError(403, "FORBIDDEN", "This needs an admin account.")
+    return claims
+
+
+def _now() -> str:
+    return orders._iso(orders._now_utc())
+
+
+def _path_id(event: dict) -> str:
+    return (event.get("pathParameters") or {}).get("id", "")
+
+
+# ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
 def to_admin_order(item: dict) -> dict:
@@ -54,7 +68,9 @@ def change_status(event: dict) -> dict:
     new = body.get("status")
     if new not in (*NEXT_STATUS.values(), "CANCELLED"):
         raise ApiError(
-            400, "VALIDATION_ERROR", "`status` must be PREPARING, OUT_FOR_DELIVERY, DELIVERED or CANCELLED."
+            400,
+            "VALIDATION_ERROR",
+            "`status` must be CONFIRMED, PREPARING, OUT_FOR_DELIVERY, DELIVERED or CANCELLED.",
         )
     order = _find_order(_path_id(event))
     current = order["status"]
@@ -72,13 +88,5 @@ def change_status(event: dict) -> dict:
     sets = [
         "#s = :new",
         "updated_at = :now",
-        "status_history = list_append(if_not_exists(status_history, :empty), :entry)",
-    ]
-
-    if new == "CANCELLED":
-        if current not in KITCHEN_CANCELLABLE:
-            raise ApiError(409, "INVALID_STATUS_CHANGE", f"A {current.lower().replace('_', ' ')} order can't be cancelled.")
-        reason = body.get("reason")
-        reason = " ".join(reason.split()) if isinstance(reason, str) else ""
 PYSRC
 }

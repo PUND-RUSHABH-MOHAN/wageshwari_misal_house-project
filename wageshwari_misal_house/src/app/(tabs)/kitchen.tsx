@@ -27,7 +27,7 @@ import { useApp } from '@/context/AppContext';
 import { adminApi, errorMessage } from '@/services/api';
 import { withAuth } from '@/services/session';
 import type { AdminOrder, OrderStatus } from '@/types';
-import { formatDeliveryDate } from '@/utils/format';
+import { formatCurrency, formatDeliveryDate } from '@/utils/format';
 import { istDate } from '@/utils/pricing';
 
 const POLL_MS = 20000;
@@ -106,6 +106,18 @@ export default function KitchenScreen() {
   };
 
   const onNext = (order: AdminOrder, next: OrderStatus) => {
+    if (next === 'CONFIRMED') {
+      // UPI: only after the money is visible in the hotel's UPI app.
+      Alert.alert(
+        `Received ${formatCurrency(order.total)}?`,
+        `Check your UPI app for this amount${order.utr ? ` and UTR ${order.utr}` : ''} (note “Order ${order.order_number}”).`,
+        [
+          { text: 'Not yet', style: 'cancel' },
+          { text: 'Yes, received', onPress: () => moveTo(order, next) },
+        ],
+      );
+      return;
+    }
     if (next !== 'DELIVERED') {
       moveTo(order, next);
       return;
@@ -168,7 +180,8 @@ export default function KitchenScreen() {
         </View>
         {orders.length > 0 ? (
           <View style={styles.counts}>
-            <Count label="New" value={count(['CONFIRMED', 'PENDING_PAYMENT'])} color={Colors.info} />
+            <Count label="To check" value={count(['PENDING_PAYMENT'])} color={Colors.warning} />
+            <Count label="New" value={count(['CONFIRMED'])} color={Colors.info} />
             <Count label="Cooking" value={count(['PREPARING'])} color={Colors.primary} />
             <Count label="On the way" value={count(['OUT_FOR_DELIVERY'])} color="#6A1B9A" />
             <Count label="Delivered" value={count(['DELIVERED'])} color={Colors.success} />

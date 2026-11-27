@@ -17,6 +17,9 @@ Routes
 Order status rules
   - One step forward at a time: CONFIRMED -> PREPARING -> OUT_FOR_DELIVERY -> DELIVERED.
     DELIVERED also marks a cash order as paid (the rider collected the cash).
+  - UPI orders start at PENDING_PAYMENT. PENDING_PAYMENT -> CONFIRMED means "Payment received":
+    someone checked the hotel's UPI app (amount + order number / UTR); it marks the order paid.
+    If the money never came, cancel with a reason instead.
   - The kitchen may cancel any order that isn't delivered yet; a reason (3-120 chars) is
     required and shown to the customer.
   - Each change is conditional on the status the admin saw, so two people tapping at once
@@ -44,6 +47,7 @@ import users
 from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response, role_from_claims
 
 NEXT_STATUS = {
+    "PENDING_PAYMENT": "CONFIRMED",  # UPI: payment received (checked by hand in the hotel's UPI app)
     "CONFIRMED": "PREPARING",
     "PREPARING": "OUT_FOR_DELIVERY",
     "OUT_FOR_DELIVERY": "DELIVERED",
@@ -123,7 +127,9 @@ def change_status(event: dict) -> dict:
     new = body.get("status")
     if new not in (*NEXT_STATUS.values(), "CANCELLED"):
         raise ApiError(
-            400, "VALIDATION_ERROR", "`status` must be PREPARING, OUT_FOR_DELIVERY, DELIVERED or CANCELLED."
+            400,
+            "VALIDATION_ERROR",
+            "`status` must be CONFIRMED, PREPARING, OUT_FOR_DELIVERY, DELIVERED or CANCELLED.",
         )
     order = _find_order(_path_id(event))
     current = order["status"]
@@ -158,6 +164,9 @@ def change_status(event: dict) -> dict:
             expected = NEXT_STATUS.get(current)
             hint = f" The next step is {expected}." if expected else ""
             raise ApiError(409, "INVALID_STATUS_CHANGE", f"This order is {current}; it can't go to {new}.{hint}")
+        if new == "CONFIRMED":  # from PENDING_PAYMENT: the UPI money is in
+            sets += ["payment_status = :paid", "payment_verified_at = :now", "payment_verified_by = :by"]
+            values.update({":paid": "paid", ":by": by})
         if new == "DELIVERED":
             sets.append("delivered_at = :now")
             if order.get("payment_method") == "cod":
