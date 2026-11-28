@@ -27,15 +27,23 @@ locals {
     "POST /orders/{id}/cancel"   = { fn = "orders", auth = true }
     "POST /orders/{id}/payment"  = { fn = "orders", auth = true }
     # Admin: the JWT authorizer checks the login; admin.py checks the `admin` group (403 otherwise).
-    "GET /admin/orders"              = { fn = "admin", auth = true }
-    "POST /admin/orders/{id}/status" = { fn = "admin", auth = true }
-    "GET /admin/categories"          = { fn = "admin", auth = true }
-    "POST /admin/categories"         = { fn = "admin", auth = true }
-    "PATCH /admin/categories/{id}"   = { fn = "admin", auth = true }
-    "GET /admin/products"            = { fn = "admin", auth = true }
-    "POST /admin/products"           = { fn = "admin", auth = true }
-    "PATCH /admin/products/{id}"     = { fn = "admin", auth = true }
-    "PATCH /admin/store"             = { fn = "admin", auth = true }
+    "GET /admin/orders"               = { fn = "admin", auth = true }
+    "POST /admin/orders/{id}/status"  = { fn = "admin", auth = true }
+    "GET /admin/categories"           = { fn = "admin", auth = true }
+    "POST /admin/categories"          = { fn = "admin", auth = true }
+    "PATCH /admin/categories/{id}"    = { fn = "admin", auth = true }
+    "GET /admin/products"             = { fn = "admin", auth = true }
+    "POST /admin/products"            = { fn = "admin", auth = true }
+    "PATCH /admin/products/{id}"      = { fn = "admin", auth = true }
+    "PATCH /admin/store"              = { fn = "admin", auth = true }
+    "POST /admin/orders/{id}/assign"  = { fn = "admin", auth = true }
+    "GET /admin/delivery-boys"        = { fn = "admin", auth = true }
+    "PATCH /admin/delivery-boys/{id}" = { fn = "admin", auth = true }
+    # Delivery boys (part 7c): the JWT authorizer checks the login; delivery.py checks the `delivery` group.
+    "GET /delivery/me"                  = { fn = "delivery", auth = true }
+    "PATCH /delivery/me"                = { fn = "delivery", auth = true }
+    "GET /delivery/orders"              = { fn = "delivery", auth = true }
+    "POST /delivery/orders/{id}/status" = { fn = "delivery", auth = true }
   }
 }
 

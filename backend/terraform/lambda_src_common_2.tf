@@ -28,6 +28,15 @@ def role_from_claims(claims: dict) -> str:
     return "admin" if "admin" in groups_from_claims(claims) else "customer"
 
 
+STAFF_GROUPS = ("admin", "delivery")
+
+
+def roles_from_claims(claims: dict) -> list[str]:
+    """Staff groups the user is in, e.g. ["admin", "delivery"] (part 7c). Customers: []."""
+    groups = set(groups_from_claims(claims))
+    return [g for g in STAFF_GROUPS if g in groups]
+
+
 def dispatch(routes: dict[str, Callable[[dict], dict]], event: dict) -> dict:
     """Route by HTTP API routeKey (e.g. "POST /auth/login") and map errors."""
     route_key = event.get("routeKey", "")
@@ -69,15 +78,5 @@ def validate_email(value: Any) -> str:
         raise ApiError(400, "VALIDATION_ERROR", "`email` is required.")
     email = value.strip().lower()
     if len(email) > 254 or not _EMAIL_RE.match(email):
-        raise ApiError(400, "VALIDATION_ERROR", "`email` is not a valid email address.")
-    return email
-
-
-def validate_phone(value: Any) -> str:
-    if not isinstance(value, str):
-        raise ApiError(400, "VALIDATION_ERROR", "`phone` is required.")
-    phone = value.strip()
-    if not _PHONE_RE.match(phone):
-        raise ApiError(
 PYSRC
 }

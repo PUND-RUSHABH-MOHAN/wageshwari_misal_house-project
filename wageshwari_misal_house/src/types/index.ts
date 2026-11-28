@@ -14,6 +14,8 @@ export type Paise = number;
 // users
 // ---------------------------------------------------------------------------
 export type UserRole = 'customer' | 'admin';
+/** Staff groups (Cognito groups) a user is in. One person can be both. */
+export type StaffRole = 'admin' | 'delivery';
 
 export interface User {
   id: ID;
@@ -21,6 +23,8 @@ export interface User {
   phone: string;
   email: string;
   role: UserRole;
+  /** Part 7c: staff groups, e.g. ['admin', 'delivery']. Missing on older servers. */
+  roles?: StaffRole[];
   is_active: boolean;
 }
 
@@ -102,10 +106,16 @@ export interface CartItem {
 // ---------------------------------------------------------------------------
 // orders & order_items
 // ---------------------------------------------------------------------------
+/**
+ * Part 7c flow: PENDING (cash) / PENDING_PAYMENT (UPI) -> CONFIRMED -> ASSIGNED (to a delivery boy)
+ * -> OUT_FOR_DELIVERY -> DELIVERED. PREPARING only appears on orders from before part 7c.
+ */
 export type OrderStatus =
+  | 'PENDING'
   | 'PENDING_PAYMENT'
   | 'CONFIRMED'
   | 'PREPARING'
+  | 'ASSIGNED'
   | 'OUT_FOR_DELIVERY'
   | 'DELIVERED'
   | 'CANCELLED';
@@ -166,6 +176,10 @@ export interface Order {
   payment_expires_at?: string;
   /** UPI orders still waiting for payment: how to pay. */
   upi_payment?: UpiPayment;
+  /** Part 7c: who brings it. Phone only while assigned / out for delivery. */
+  delivery_boy?: { name: string; phone?: string };
+  /** ISO timestamp, once delivered. */
+  delivered_at?: string;
   /** ISO timestamp — standard created_at column. */
   created_at: string;
   /** Joined order_items rows (GET /orders/:id?include=items). */
@@ -212,8 +226,65 @@ export interface StatusHistoryEntry {
   by: string;
 }
 
-export interface AdminOrder extends Order {
+/** What happened to the auto-assign after "Confirm order" (part 7c). */
+export type AutoAssign = 'assigned' | 'none_available' | 'unchanged';
+
+export interface AdminOrder extends Omit<Order, 'delivery_boy'> {
   status_history: StatusHistoryEntry[];
+  delivery_boy?: { id: ID; name: string; phone: string };
+  assigned_at?: string;
+  /** "auto" or the admin's email */
+  assigned_by?: string;
+  /** Only on the answer to a confirm. */
+  auto_assign?: AutoAssign;
+}
+
+// ---------------------------------------------------------------------------
+// delivery boys (part 7c): GET /admin/delivery-boys, /delivery/*
+// ---------------------------------------------------------------------------
+export interface DeliveryBoy {
+  id: ID;
+  name: string;
+  phone: string;
+  /** On duty today (resets at midnight). */
+  on_duty: boolean;
+  /** Orders assigned or out for delivery right now. */
+  active_orders: number;
+  last_assigned_at: string | null;
+}
+
+/**
+ * An order as the delivery boy sees it. `customer`, `address`, `collect_cash` only while it is
+ * ASSIGNED / OUT_FOR_DELIVERY; finished ones keep just the summary.
+ */
+export interface DeliveryOrder {
+  id: ID;
+  order_number: string;
+  status: OrderStatus;
+  delivery_date: string;
+  slot_label: string;
+  total: Paise;
+  payment_method: PaymentMethod;
+  payment_status: PaymentStatus;
+  area: string;
+  items: { product_name: string; quantity: number; spice_level?: SpiceLevel; note?: string }[];
+  customer?: { name: string; phone: string };
+  address?: {
+    label?: string;
+    line1: string;
+    line2?: string;
+    landmark?: string;
+    city: string;
+    state: string;
+    pincode: string;
+    latitude: number;
+    longitude: number;
+  };
+  /** Cash to collect at the door (0 when already paid by UPI). */
+  collect_cash?: Paise;
+  assigned_at?: string;
+  delivered_at?: string;
+  cancel_reason?: string;
 }
 
 /** A dish as the kitchen sees it: `is_active: false` = hidden from customers. */

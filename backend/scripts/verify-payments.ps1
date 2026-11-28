@@ -123,7 +123,7 @@ try {
     $board = Invoke-Api GET "/admin/orders?date=$tomorrow" -Token $t
     $onBoard = @($board.Body | Where-Object { $_.id -eq $id })
     Assert "kitchen sees it with the UTR" (($onBoard.Count -eq 1) -and ($onBoard[0].utr -eq $fakeUtr))
-    Check "kitchen can't cook before payment" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "PREPARING" } -Token $t) 409 "INVALID_STATUS_CHANGE"
+    Check "can't send it out before payment" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "OUT_FOR_DELIVERY" } -Token $t) 409 "INVALID_STATUS_CHANGE"
     $c = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CONFIRMED" } -Token $t
     Check "kitchen: Payment received" $c 200 -Extra "$($c.Body.status) / $($c.Body.payment_status)"
     Assert "order is paid, link gone" (($c.Body.payment_status -eq "paid") -and (-not $c.Body.upi_payment))

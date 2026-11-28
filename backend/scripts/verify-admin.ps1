@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
   Checks the deployed admin API (Part 6) with an account in the Cognito `admin` group.
-  It places ONE real cash order for tomorrow from that account, moves it to PREPARING, and then
-  cancels it from the kitchen with the reason "Verify script test". The menu is only read
+  It places ONE real cash order for tomorrow from that account, confirms it (part 7c: if a
+  delivery boy is on duty it is assigned to him for a moment), and then cancels it from the
+  kitchen with the reason "Verify script test". The menu is only read
   (one no-change write), so customers see nothing different.
   Pass -CustomerEmail (a normal, non-admin account) to also check that customers get 403.
   Works in Windows PowerShell 5.1 and PowerShell 7.
@@ -133,16 +134,21 @@ try {
     $next = Invoke-Api GET "/admin/orders?date=$tomorrow" -Token $t
     Assert "it's on tomorrow's board" (@($next.Body | Where-Object { $_.id -eq $id }).Count -eq 1)
     Check "skipping a step is refused" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "DELIVERED" } -Token $t) 409 "INVALID_STATUS_CHANGE"
-    $p = Invoke-Api POST "/admin/orders/$id/status" @{ status = "PREPARING" } -Token $t
-    Check "kitchen: Start preparing" $p 200 -Extra $p.Body.status
-    Check "same step twice is refused" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "PREPARING" } -Token $t) 409 "INVALID_STATUS_CHANGE"
-    Check "customer can't cancel once cooking" (Invoke-Api POST "/orders/$id/cancel" -Token $t) 409 "ORDER_NOT_CANCELLABLE"
+    Assert "new cash order waits as PENDING" ($o.Body.status -eq "PENDING") $o.Body.status
+    $p = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CONFIRMED" } -Token $t
+    Check "kitchen: Confirm order" $p 200 -Extra "$($p.Body.status) (auto-assign: $($p.Body.auto_assign))"
+    $again = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CONFIRMED" } -Token $t
+    Assert "confirming twice changes nothing" (($again.Status -eq 200) -and ($again.Body.auto_assign -eq "unchanged")) $again.Body.auto_assign
+    if ($p.Body.status -eq "ASSIGNED") {
+      Check "customer can't cancel once assigned" (Invoke-Api POST "/orders/$id/cancel" -Token $t) 409 "ORDER_NOT_CANCELLABLE"
+    }
     Check "kitchen cancel needs a reason" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "CANCELLED" } -Token $t) 400 "VALIDATION_ERROR"
     $c = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CANCELLED"; reason = "Verify script test" } -Token $t
     Check "kitchen cancel with reason" $c 200 -Extra $c.Body.status
     $mine = Invoke-Api GET "/orders/$id" -Token $t
     Assert "customer sees the reason" ($mine.Body.cancel_reason -eq "Verify script test") $mine.Body.cancel_reason
-    Assert "history has 3 steps" (@($c.Body.status_history).Count -eq 3) (($c.Body.status_history | ForEach-Object { $_.status }) -join " > ")
+    $steps = ($c.Body.status_history | ForEach-Object { $_.status }) -join " > "
+    Assert "history starts PENDING > CONFIRMED, ends CANCELLED" ($steps -like "PENDING > CONFIRMED*CANCELLED") $steps
   }
 } finally {
   if ($tempAddress) {

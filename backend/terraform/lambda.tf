@@ -27,7 +27,12 @@ locals {
     }
     admin = {
       handler = "admin.handler"
-      files   = ["common.py", "users.py", "store.py", "addresses.py", "orders.py", "catalog.py", "admin.py"]
+      files   = ["common.py", "users.py", "store.py", "addresses.py", "orders.py", "catalog.py", "delivery_boys.py", "admin.py"]
+    }
+    # The delivery boy's Deliveries tab (part 7c).
+    delivery = {
+      handler = "delivery.handler"
+      files   = ["common.py", "users.py", "store.py", "addresses.py", "orders.py", "delivery_boys.py", "delivery.py"]
     }
     # Not behind the API: EventBridge Scheduler runs it every 10 minutes (scheduler.tf).
     expire = {

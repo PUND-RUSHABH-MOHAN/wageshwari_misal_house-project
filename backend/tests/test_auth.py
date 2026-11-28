@@ -154,11 +154,11 @@ def test_login_success_returns_contract_shape(aws):
     assert body["token"].count(".") == 2
     assert isinstance(body["expires_in"], int)
     user = body["user"]
-    assert set(user) == {"id", "name", "phone", "email", "role", "is_active"}
+    assert set(user) == {"id", "name", "phone", "email", "role", "roles", "is_active"}
     assert user["name"] == "Naman K"
     assert user["phone"] == "9876543210"
     assert user["email"] == EMAIL_NORM
-    assert user["role"] == "customer"
+    assert user["role"] == "customer" and user["roles"] == []
     assert user["is_active"] is True
 
 
@@ -166,7 +166,7 @@ def test_login_admin_role_from_group(aws):
     register_and_confirm(aws)
     aws["idp"].admin_add_user_to_group(UserPoolId=aws["pool_id"], Username=EMAIL_NORM, GroupName="admin")
     status, body = login()
-    assert status == 200 and body["user"]["role"] == "admin"
+    assert status == 200 and body["user"]["role"] == "admin" and body["user"]["roles"] == ["admin"]
 
 
 def test_login_wrong_password(aws):

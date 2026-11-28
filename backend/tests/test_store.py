@@ -115,7 +115,7 @@ def test_existing_orders_keep_working_while_closed(env, monkeypatch):
         "routeKey": "POST /admin/orders/{id}/status",
         "requestContext": {"authorizer": {"jwt": {"claims": CHEF}}},
         "pathParameters": {"id": cod["id"]},
-        "body": json.dumps({"status": "PREPARING"}),
+        "body": json.dumps({"status": "CONFIRMED"}),
     }
     assert invoke(admin, move)[0] == 200
     # ...but a brand-new order is refused

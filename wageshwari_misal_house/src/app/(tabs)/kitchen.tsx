@@ -2,6 +2,8 @@
  * Kitchen board (admins only; the tab is hidden for customers and the server answers 403).
  * GET /admin/orders for today or tomorrow, grouped by delivery slot; one tap moves an order
  * to its next step (POST /admin/orders/:id/status). Re-checks every 20 s while open.
+ * Part 7c: "Confirm order" also auto-assigns a delivery boy; if nobody is on duty the admin is
+ * told and can assign by hand (AssignSheet -> POST /admin/orders/:id/assign).
  * The "Online orders" switch at the top stops / restarts new orders (PATCH /admin/store).
  */
 import { router, useFocusEffect } from 'expo-router';
@@ -20,6 +22,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AssignSheet } from '@/components/AssignSheet';
 import { KitchenCancelSheet } from '@/components/KitchenCancelSheet';
 import { isKitchenDone, KitchenOrderCard } from '@/components/KitchenOrderCard';
 import { StopOrdersSheet } from '@/components/StopOrdersSheet';
@@ -50,6 +53,7 @@ export default function KitchenScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [cancelTarget, setCancelTarget] = useState<AdminOrder | null>(null);
+  const [assignTarget, setAssignTarget] = useState<AdminOrder | null>(null);
   const [showDone, setShowDone] = useState(false);
   /** Ignores answers for a day the user has already switched away from. */
   const latest = useRef(0);
@@ -135,7 +139,18 @@ export default function KitchenScreen() {
   const moveTo = async (order: AdminOrder, next: OrderStatus) => {
     setBusyId(order.id);
     try {
-      replace(await withAuth((t) => adminApi.setStatus(t, order.id, next)));
+      const updated = await withAuth((t) => adminApi.setStatus(t, order.id, next));
+      replace(updated);
+      if (updated.auto_assign === 'none_available') {
+        Alert.alert(
+          'No delivery boy available',
+          `${updated.order_number} is confirmed, but nobody is on duty right now. Assign someone by hand?`,
+          [
+            { text: 'Later', style: 'cancel' },
+            { text: 'Assign now', onPress: () => setAssignTarget(updated) },
+          ],
+        );
+      }
     } catch (e) {
       Alert.alert("Couldn't update the order", errorMessage(e));
       load(); // someone else may have changed it: show the real state
@@ -145,6 +160,21 @@ export default function KitchenScreen() {
   };
 
   const onNext = (order: AdminOrder, next: OrderStatus) => {
+    if (next === 'CONFIRMED' && order.status === 'PENDING') {
+      moveTo(order, next); // cash order: confirm + auto-assign in one tap (a second tap changes nothing)
+      return;
+    }
+    if (next === 'OUT_FOR_DELIVERY' && order.status === 'ASSIGNED') {
+      Alert.alert(
+        'Mark as picked up?',
+        `${order.delivery_boy?.name ?? 'The delivery boy'} normally taps this in the Deliveries tab.`,
+        [
+          { text: 'Not yet', style: 'cancel' },
+          { text: 'Picked up', onPress: () => moveTo(order, next) },
+        ],
+      );
+      return;
+    }
     if (next === 'CONFIRMED') {
       // UPI: only after the money is visible in the hotel's UPI app.
       Alert.alert(
@@ -239,9 +269,9 @@ export default function KitchenScreen() {
         </View>
         {orders.length > 0 ? (
           <View style={styles.counts}>
-            <Count label="To check" value={count(['PENDING_PAYMENT'])} color={Colors.warning} />
-            <Count label="New" value={count(['CONFIRMED'])} color={Colors.info} />
-            <Count label="Cooking" value={count(['PREPARING'])} color={Colors.primary} />
+            <Count label="New" value={count(['PENDING', 'PENDING_PAYMENT'])} color={Colors.warning} />
+            <Count label="To assign" value={count(['CONFIRMED', 'PREPARING'])} color={Colors.info} />
+            <Count label="Assigned" value={count(['ASSIGNED'])} color={Colors.primary} />
             <Count label="On the way" value={count(['OUT_FOR_DELIVERY'])} color="#6A1B9A" />
             <Count label="Delivered" value={count(['DELIVERED'])} color={Colors.success} />
           </View>
@@ -278,6 +308,7 @@ export default function KitchenScreen() {
                     busy={busyId === o.id}
                     onNext={(next) => onNext(o, next)}
                     onCancel={() => setCancelTarget(o)}
+                    onAssign={() => setAssignTarget(o)}
                   />
                 ))}
               </View>
@@ -292,7 +323,14 @@ export default function KitchenScreen() {
                 </Pressable>
                 {showDone
                   ? done.map((o) => (
-                      <KitchenOrderCard key={o.id} order={o} busy={false} onNext={() => {}} onCancel={() => {}} />
+                      <KitchenOrderCard
+                        key={o.id}
+                        order={o}
+                        busy={false}
+                        onNext={() => {}}
+                        onCancel={() => {}}
+                        onAssign={() => {}}
+                      />
                     ))
                   : null}
               </View>
@@ -306,6 +344,15 @@ export default function KitchenScreen() {
         visible={stopOpen}
         onClose={() => setStopOpen(false)}
         onConfirm={stopOrders}
+      />
+      <AssignSheet
+        key={assignTarget?.id ?? 'no-assign'}
+        order={assignTarget}
+        onClose={() => setAssignTarget(null)}
+        onAssigned={(updated) => {
+          replace(updated);
+          setAssignTarget(null);
+        }}
       />
       <KitchenCancelSheet
         key={cancelTarget?.id ?? 'none'}

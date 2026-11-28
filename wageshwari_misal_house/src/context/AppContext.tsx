@@ -137,9 +137,9 @@ const sameLine = (a: CartItem, b: CartItem) =>
   (a.note ?? '').trim() === (b.note ?? '').trim();
 
 export const isTerminalStatus = (s: OrderStatus) => s === 'DELIVERED' || s === 'CANCELLED';
-/** Same rule as the server: before the kitchen starts, and not after a UPI payment was reported. */
+/** Same rule as the server: before a delivery boy is assigned, and not after a UPI payment was reported. */
 export const isCancellable = (o: Order) =>
-  (o.status === 'PENDING_PAYMENT' || o.status === 'CONFIRMED') && !o.utr;
+  (o.status === 'PENDING' || o.status === 'PENDING_PAYMENT' || o.status === 'CONFIRMED') && !o.utr;
 
 /** A random Idempotency-Key for one checkout (8–64 of A-Z a-z 0-9 _ -). */
 const newCheckoutKey = () =>
@@ -326,6 +326,8 @@ interface AppContextValue {
   currentUser: User | null;
   /** True for accounts in the Cognito `admin` group (Kitchen tab, Manage menu). */
   isAdmin: boolean;
+  /** True for accounts in the Cognito `delivery` group (Deliveries tab, part 7c). */
+  isDeliveryBoy: boolean;
   categories: Category[];
   products: Product[];
   catalogStatus: CatalogStatus;
@@ -552,6 +554,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value: AppContextValue = {
     currentUser: state.currentUser,
     isAdmin: state.currentUser?.role === 'admin',
+    isDeliveryBoy: state.currentUser?.roles?.includes('delivery') ?? false,
     categories: [...state.categories]
       .filter((c) => c.is_active)
       .sort((a, b) => a.sort_order - b.sort_order),

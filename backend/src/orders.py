@@ -13,7 +13,8 @@ Rules (the app shows the same ones; the server's answer is final)
     frozen copy of the dish names/prices and of the delivery address.
   - Bill: subtotal + ₹30 delivery + 5% GST on the subtotal (rounded half up), integer paise.
   - Minimum order: MIN_ORDER_PAISE of food (subtotal), default ₹100.
-  - Payment: cash on delivery (starts CONFIRMED) or direct UPI, `payment_method: "online"` (part 7).
+  - Payment: cash on delivery (starts PENDING until the kitchen confirms it, part 7c) or direct UPI,
+    `payment_method: "online"` (part 7).
     A UPI order starts PENDING_PAYMENT with `upi_payment` (UPI ID, amount, link for the UPI app / QR).
     The customer pays in their UPI app and sends the 12-digit UTR; the kitchen checks its UPI app
     and confirms (admin.py). There's no gateway, so nothing confirms payments automatically.
@@ -22,8 +23,12 @@ Rules (the app shows the same ones; the server's answer is final)
     9:00 AM to 9:00 PM; a slot for today closes 30 minutes before it starts.
   - The hotel can switch online orders off (store.py): new orders get 409 STORE_CLOSED.
   - The address must be the user's and still inside the delivery area.
-  - Cancel only while CONFIRMED / PENDING_PAYMENT (before the kitchen starts), and not once a UPI
-    payment has been reported (UTR sent): that needs a refund, so the hotel handles it.
+  - Status flow (part 7c): PENDING / PENDING_PAYMENT -> CONFIRMED -> ASSIGNED (to a delivery boy)
+    -> OUT_FOR_DELIVERY -> DELIVERED. Orders from before part 7c may still be PREPARING.
+  - Cancel only while PENDING / PENDING_PAYMENT / CONFIRMED (before a delivery boy is assigned),
+    and not once a UPI payment has been reported (UTR sent): that needs a refund, so the hotel
+    handles it.
+  - Once assigned, the customer sees the delivery boy's name and phone (name only once delivered).
   - Idempotency: the same Idempotency-Key with the same body returns the first order instead
     of creating a second one (records expire after 24 h via the table's TTL).
 
@@ -66,7 +71,7 @@ MAX_QUANTITY = 20
 NOTE_MAX = 120
 SPICE_LEVELS = ("mild", "medium", "teekha")
 PAYMENT_METHODS = ("cod", "online")
-CANCELLABLE = ("PENDING_PAYMENT", "CONFIRMED")
+CANCELLABLE = ("PENDING_PAYMENT", "PENDING", "CONFIRMED")
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 SLOT_CUTOFF_MINUTES = 30
 LIST_LIMIT = 50
@@ -353,7 +358,9 @@ ORDER_FIELDS = (
     "subtotal", "delivery_fee", "tax", "total", "payment_method", "payment_status", "created_at", "items",
     "cancelled_by", "cancel_reason",  # only on cancelled orders (kitchen / system cancels give a reason)
     "utr", "payment_expires_at",  # UPI orders: the reference the customer sent; pay-by time
+    "delivered_at",
 )
+DELIVERY_ACTIVE = ("ASSIGNED", "OUT_FOR_DELIVERY")
 
 
 def history_entry(status: str, at: str, by: str) -> dict:
@@ -367,6 +374,11 @@ def to_order(item: dict) -> dict:
     pay = upi_payment(item)
     if pay:
         out["upi_payment"] = pay
+    if item.get("delivery_boy_id") and item.get("status") in (*DELIVERY_ACTIVE, "DELIVERED"):
+        # Part 7c: who brings the order. The phone only while the delivery is on.
+        out["delivery_boy"] = {"name": item.get("delivery_boy_name", "")}
+        if item["status"] in DELIVERY_ACTIVE:
+            out["delivery_boy"]["phone"] = item.get("delivery_boy_phone", "")
     return out
 
 
@@ -468,7 +480,7 @@ def create_order(event: dict) -> dict:
 
     created_at = _iso(now)
     upi = request["payment_method"] == "online"
-    status = "PENDING_PAYMENT" if upi else "CONFIRMED"
+    status = "PENDING_PAYMENT" if upi else "PENDING"
     order = _to_ddb(
         {
             **_key(user_id, f"ORDER#{order_id}"),
@@ -481,7 +493,7 @@ def create_order(event: dict) -> dict:
             "slot_label": request["slot_label"],
             "slot_id": slot_id,
             "slot_start_hour": start_hour,
-            "status": status,  # COD: CONFIRMED; UPI: PENDING_PAYMENT until the kitchen sees the money
+            "status": status,  # COD: PENDING until the kitchen confirms; UPI: PENDING_PAYMENT until it sees the money
             **bill,
             "payment_method": request["payment_method"],
             "payment_status": "pending",
@@ -546,14 +558,15 @@ def cancel_order(event: dict) -> dict:
                 "SET #s = :cancelled, cancelled_at = :now, updated_at = :now, cancelled_by = :by, "
                 "status_history = list_append(if_not_exists(status_history, :empty), :entry)"
             ),
-            # Not once the kitchen started, and not after a UPI payment was reported (needs a refund).
-            ConditionExpression="#s IN (:pending, :confirmed) AND attribute_not_exists(utr)",
+            # Not once a delivery boy has it, and not after a UPI payment was reported (needs a refund).
+            ConditionExpression="#s IN (:s0, :s1, :s2) AND attribute_not_exists(utr)",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":cancelled": "CANCELLED",
                 ":now": now,
-                ":pending": CANCELLABLE[0],
-                ":confirmed": CANCELLABLE[1],
+                ":s0": CANCELLABLE[0],
+                ":s1": CANCELLABLE[1],
+                ":s2": CANCELLABLE[2],
                 ":by": "customer",
                 ":empty": [],
                 ":entry": [history_entry("CANCELLED", now, "customer")],
@@ -570,7 +583,9 @@ def cancel_order(event: dict) -> dict:
                 "You've already paid for this order by UPI. Please call the hotel to cancel and get a refund.",
             ) from err
         raise ApiError(
-            409, "ORDER_NOT_CANCELLABLE", "The kitchen has already started this order, so it can't be cancelled."
+            409,
+            "ORDER_NOT_CANCELLABLE",
+            "A delivery boy already has this order, so it can't be cancelled here. Please call the hotel.",
         ) from err
     return response(200, to_order(updated))
 

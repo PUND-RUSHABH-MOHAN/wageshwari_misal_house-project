@@ -38,6 +38,7 @@ from common import (
     require_str,
     response,
     role_from_claims,
+    roles_from_claims,
     validate_code,
     validate_email,
     validate_name,

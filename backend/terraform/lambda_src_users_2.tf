@@ -2,6 +2,12 @@
 
 locals {
   lambda_src_users_2 = <<PYSRC
+    for i, (field, value) in enumerate(sorted(changes.items())):
+        names[f"#f{i}"] = field
+        values[f":v{i}"] = value
+        sets.append(f"#f{i} = :v{i}")
+    result = table().update_item(
+        Key=_key(user_id),
         UpdateExpression="SET " + ", ".join(sets),
         ExpressionAttributeNames=names,
         ExpressionAttributeValues=values,

@@ -77,7 +77,7 @@ def test_list_orders_for_a_day_by_slot(env):
     assert status == 200
     assert [o["id"] for o in board] == [early["id"], morning["id"]]  # the 9 AM slot first
     assert board[0]["address_snapshot"]["receiver_phone"] == "9876543210"
-    assert board[0]["status_history"][0]["status"] == "CONFIRMED"
+    assert board[0]["status_history"][0]["status"] == "PENDING"  # cash orders wait for the kitchen
     _, next_day, _ = adm("GET /admin/orders", query={"date": TOMORROW})
     assert [o["id"] for o in next_day] == [tomorrow["id"]]
 
@@ -96,20 +96,34 @@ def test_list_bad_date(env, day):
 
 
 # ---------------------------------------------------------------- status moves
-def test_full_happy_path_and_customer_sees_it(env):
+# (assignment and delivery boys: test_delivery.py)
+def test_full_happy_path_without_delivery_boys(env):
+    """Nobody on duty: confirm leaves it CONFIRMED; once assigned the admin can finish it."""
     o = new_order()
-    for step in ("PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"):
+    status, out, _ = move(o["id"], "CONFIRMED")
+    assert status == 200 and out["status"] == "CONFIRMED" and out["auto_assign"] == "none_available"
+    status, out, _ = move(o["id"], "OUT_FOR_DELIVERY")
+    assert status == 409 and "Assign a delivery boy" in out["error"]["message"]
+    _, mine, _ = invoke(orders, ev("GET /orders/{id}", order_id=o["id"]))
+    assert mine["status"] == "CONFIRMED" and "status_history" not in mine
+
+
+def test_legacy_preparing_order_can_finish(env):
+    o = new_order()
+    env["table"].update_item(
+        Key={"PK": f"USER#{ALICE['sub']}", "SK": f"ORDER#{o['id']}"},
+        UpdateExpression="SET #s = :p",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":p": "PREPARING"},
+    )
+    for step in ("OUT_FOR_DELIVERY", "DELIVERED"):
         status, out, _ = move(o["id"], step)
         assert status == 200 and out["status"] == step, out
     assert out["payment_status"] == "paid"  # cash collected on delivery
-    assert [h["status"] for h in out["status_history"]] == ["CONFIRMED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"]
     assert out["status_history"][-1]["by"] == "chef@example.com"
-    # The customer's own view shows the new status, without the history
-    _, mine, _ = invoke(orders, ev("GET /orders/{id}", order_id=o["id"]))
-    assert mine["status"] == "DELIVERED" and "status_history" not in mine
 
 
-@pytest.mark.parametrize("jump", ["OUT_FOR_DELIVERY", "DELIVERED", "PREPARING_X", "CONFIRMED"])
+@pytest.mark.parametrize("jump", ["OUT_FOR_DELIVERY", "DELIVERED", "PREPARING", "ASSIGNED", "PENDING"])
 def test_cannot_skip_or_invent_steps(env, jump):
     o = new_order()
     status, out, _ = move(o["id"], jump)
@@ -118,26 +132,27 @@ def test_cannot_skip_or_invent_steps(env, jump):
         assert out["error"]["code"] == "INVALID_STATUS_CHANGE"
 
 
-def test_cannot_move_twice_to_same_step(env):
+def test_confirming_twice_changes_nothing(env):
     o = new_order()
-    assert move(o["id"], "PREPARING")[0] == 200
-    status, out, _ = move(o["id"], "PREPARING")
-    assert status == 409 and out["error"]["code"] == "INVALID_STATUS_CHANGE"
+    _, first, _ = move(o["id"], "CONFIRMED")
+    status, again, _ = move(o["id"], "CONFIRMED")
+    assert status == 200 and again["auto_assign"] == "unchanged"
+    assert again["status_history"] == first["status_history"]
 
 
 def test_concurrent_change_is_refused(env, monkeypatch):
-    """Two admins tap at the same time: both read CONFIRMED, only the first write wins."""
+    """Two admins: one cancels while the other confirms from a stale read."""
     o = new_order()
     stale = admin._find_order(o["id"])
-    assert move(o["id"], "PREPARING")[0] == 200
+    assert move(o["id"], "CANCELLED", reason="Customer called")[0] == 200
     monkeypatch.setattr(admin, "_find_order", lambda _id: stale)
-    status, out, _ = move(o["id"], "PREPARING")
+    status, out, _ = move(o["id"], "CONFIRMED")
     assert status == 409 and out["error"]["code"] == "ORDER_CHANGED"
 
 
 def test_kitchen_cancel_needs_reason_and_customer_sees_it(env):
     o = new_order()
-    move(o["id"], "PREPARING")
+    move(o["id"], "CONFIRMED")
     status, out, _ = move(o["id"], "CANCELLED")
     assert status == 400 and "reason" in out["error"]["message"]
     status, out, _ = move(o["id"], "CANCELLED", reason="  Out of   misal today ")
@@ -146,10 +161,9 @@ def test_kitchen_cancel_needs_reason_and_customer_sees_it(env):
     assert mine["cancel_reason"] == "Out of misal today" and mine["cancelled_by"] == "kitchen"
 
 
-def test_cannot_cancel_delivered(env):
+def test_cannot_cancel_cancelled(env):
     o = new_order()
-    for step in ("PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"):
-        move(o["id"], step)
+    move(o["id"], "CANCELLED", reason="No gas today")
     status, out, _ = move(o["id"], "CANCELLED", reason="Changed mind")
     assert status == 409 and out["error"]["code"] == "INVALID_STATUS_CHANGE"
 
@@ -159,12 +173,12 @@ def test_customer_cancel_is_recorded(env):
     status, c, _ = invoke(orders, ev("POST /orders/{id}/cancel", order_id=o["id"]))
     assert status == 200 and c["cancelled_by"] == "customer" and "cancel_reason" not in c
     _, board, _ = adm("GET /admin/orders")
-    assert [h["status"] for h in board[0]["status_history"]] == ["CONFIRMED", "CANCELLED"]
+    assert [h["status"] for h in board[0]["status_history"]] == ["PENDING", "CANCELLED"]
 
 
 @pytest.mark.parametrize("order_id", ["ord_0000000000000abcdef", "nope"])
 def test_unknown_order(env, order_id):
-    assert move(order_id, "PREPARING")[0] == 404
+    assert move(order_id, "CONFIRMED")[0] == 404
 
 
 def test_order_pointer_written(env):
@@ -175,8 +189,7 @@ def test_order_pointer_written(env):
 
 def test_unknown_field(env):
     o = new_order()
-    assert move(o["id"], "PREPARING")[0] == 200
-    status, _, _ = adm("POST /admin/orders/{id}/status", {"status": "OUT_FOR_DELIVERY", "x": 1}, order_id=o["id"])
+    status, _, _ = adm("POST /admin/orders/{id}/status", {"status": "CONFIRMED", "x": 1}, order_id=o["id"])
     assert status == 400
 
 

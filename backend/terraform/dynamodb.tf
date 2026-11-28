@@ -7,6 +7,7 @@
 #   PK = "ORDERREF#<id>",      SK = "ORDER"         which user an order belongs to (part 6)
 #   PK = "UTR#<utr>",          SK = "UTR"           which order a UPI reference was used for (part 7)
 #   PK = "SETTINGS",           SK = "STORE"         online orders on/off switch (part 7b)
+#   PK = "DELIVERY",           SK = "BOY#<sub>"     a delivery boy: on duty, last assignment (part 7c)
 #   PK = "CATALOG",            SK = "CATEGORY#/PRODUCT#<id>"  the menu (part 3)
 #
 # GSI1 (part 6): the kitchen's order board. Only orders carry GSI1PK/GSI1SK, so only orders are

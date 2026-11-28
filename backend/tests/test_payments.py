@@ -79,7 +79,7 @@ def test_upi_order_waits_for_payment_with_link(upi):
 def test_cod_unchanged(upi):
     adr = make_address()
     _, o, _ = place(adr)
-    assert o["status"] == "CONFIRMED" and "upi_payment" not in o and "payment_expires_at" not in o
+    assert o["status"] == "PENDING" and "upi_payment" not in o and "payment_expires_at" not in o
 
 
 def test_upi_off_when_no_upi_id(env):
@@ -159,7 +159,7 @@ def test_customer_cannot_cancel_after_sending_utr(upi):
 def test_kitchen_confirms_payment_then_cooks(upi):
     o = upi_order()
     pay(o["id"])
-    status, out = kitchen(o["id"], "PREPARING")  # can't cook before the money is checked
+    status, out = kitchen(o["id"], "OUT_FOR_DELIVERY")  # can't send it out before the money is checked
     assert status == 409 and out["error"]["code"] == "INVALID_STATUS_CHANGE"
     status, out = kitchen(o["id"], "CONFIRMED")
     assert status == 200 and out["status"] == "CONFIRMED" and out["payment_status"] == "paid"
@@ -169,8 +169,7 @@ def test_kitchen_confirms_payment_then_cooks(upi):
     assert mine["payment_status"] == "paid" and "upi_payment" not in mine
     status, out = pay(o["id"], "999999999999")
     assert status == 409 and out["error"]["code"] == "ORDER_NOT_PAYABLE"
-    for step in ("PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"):
-        assert kitchen(o["id"], step)[0] == 200
+    assert kitchen(o["id"], "OUT_FOR_DELIVERY")[0] == 409  # needs a delivery boy first (test_delivery.py)
 
 
 def test_kitchen_can_confirm_without_utr(upi):
@@ -188,11 +187,12 @@ def test_kitchen_not_received(upi):
     assert get(o["id"])["cancel_reason"] == "Payment not received"
 
 
-def test_cod_cannot_be_payment_confirmed_twice(upi):
+def test_cod_confirm_does_not_mark_paid(upi):
     adr = make_address()
     _, o, _ = place(adr)
     status, out = kitchen(o["id"], "CONFIRMED")
-    assert status == 409 and out["error"]["code"] == "INVALID_STATUS_CHANGE"
+    assert status == 200 and out["status"] == "CONFIRMED" and out["payment_status"] == "pending"
+    assert "payment_verified_at" not in out
 
 
 # ---------------------------------------------------------------- auto-expiry
@@ -213,7 +213,7 @@ def test_expire_cancels_only_overdue_unpaid(upi):
     gone = get(unpaid["id"])
     assert gone["status"] == "CANCELLED" and gone["cancelled_by"] == "system" and "call the hotel" in gone["cancel_reason"]
     assert get(with_utr["id"])["status"] == "PENDING_PAYMENT"
-    assert get(cod["id"], BOB)["status"] == "CONFIRMED"
+    assert get(cod["id"], BOB)["status"] == "PENDING"
     assert get(late["id"], BOB)["status"] == "PENDING_PAYMENT"
     assert expire.expire_unpaid() == []  # nothing left to do; running again is harmless
 

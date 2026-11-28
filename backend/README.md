@@ -10,7 +10,8 @@ Status:
 - **Part 5, orders**: deployed 2026-11-25. Place / list / view / cancel. Cash on delivery only, ₹100 minimum, India-time slots.
 - **Part 7, direct UPI payments** (no gateway), deployed 2026-11-27: UPI link + QR to the hotel's UPI ID, customer sends the UTR, the kitchen confirms "Payment received"; unpaid orders auto-cancel after 30 minutes.
 - **Part 6, kitchen + menu admin**: deployed 2026-11-25. Order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
-- **Part 7b, hours + store switch**: online delivery 9 AM – 9 PM in 12 one-hour slots; admins can stop all new online orders (Kitchen tab) until they switch them back on. *Planned, not applied yet.*
+- **Part 7b, hours + store switch**: online delivery 9 AM – 9 PM in 12 one-hour slots; admins can stop all new online orders (Kitchen tab) until they switch them back on. Deployed 2026-11-27.
+- **Part 7c, delivery boys**: cash orders wait as Pending; the admin's **Confirm order** also auto-assigns an on-duty delivery boy (or the admin assigns by hand); delivery boys see their orders in a Deliveries tab and mark Picked up / Delivered. Delivery boys = Cognito group `delivery`. Deployed 2026-11-28.
 
 ```
 backend/
@@ -23,7 +24,9 @@ backend/
 │   ├── addresses.py         /addresses (saved delivery addresses, 3 km check)
 │   ├── orders.py            /orders (place, list, view, cancel)
 │   ├── store.py             online-orders switch + delivery hours (used by catalog, orders, admin)
-│   ├── admin.py             /admin/* (kitchen order board, status moves, menu editing)
+│   ├── admin.py             /admin/* (kitchen order board, confirm + assign, menu editing)
+│   ├── delivery_boys.py     delivery boys: on duty, auto-assign, assignment writes (admin + delivery)
+│   ├── delivery.py          /delivery/* (the delivery boy's Deliveries tab)
 │   └── expire.py            scheduled: cancels unpaid UPI orders (EventBridge Scheduler)
 ├── tests/                   pytest + moto (no AWS account touched)
 ├── scripts/
@@ -34,23 +37,25 @@ backend/
 │   ├── verify-orders.ps1       places one real order for tomorrow, then cancels it
 │   ├── verify-admin.ps1        kitchen + menu admin checks with an admin account
 │   ├── verify-payments.ps1     UPI payment flow with an admin account (no real money)
-│   └── verify-store.ps1        store switch: stops online orders for a few seconds, then re-opens
+│   ├── verify-store.ps1        store switch: stops online orders for a few seconds, then re-opens
+│   └── verify-delivery.ps1     confirm -> auto-assign -> Picked up with an admin + a delivery account
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (89 resources)
+## What gets created (103 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
 | Cognito User Pool | `wmh-users` | The user directory. Stores emails and password hashes, emails the confirmation and reset codes, issues JWTs. |
 | Cognito app client | `wmh-app` | How the mobile app identifies itself to the pool. Public (no secret), because anything in an APK can be extracted. |
 | Cognito group | `admin` | Members get `role: "admin"`: the Kitchen tab and Manage menu in the app, and the `/admin/*` routes. Added by hand (see "Make someone an admin"), so no email is in the repo. |
-| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to) `UTR#<utr>` (which order a UPI reference was used for) and `SETTINGS`/`STORE` (the online-orders switch). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
+| Cognito group | `delivery` (`delivery.tf`) | Delivery boys (Part 7c): the Deliveries tab and the `/delivery/*` routes. Added by hand, like admins (see "Add a delivery boy"). One person can be in both groups. |
+| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to) `UTR#<utr>` (which order a UPI reference was used for) `SETTINGS`/`STORE` (the online-orders switch) and `DELIVERY`/`BOY#<sub>` (a delivery boy: on duty, last assignment). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
 | Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
 | IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query/delete items in `wmh-main`. Nothing else. |
-| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders`, `wmh-admin`, `wmh-expire` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`; orders/admin/expire get `UPI_ID`, `UPI_PAYEE_NAME`, `PAYMENT_WINDOW_MINUTES`. |
+| Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders`, `wmh-admin`, `wmh-delivery`, `wmh-expire` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`; orders/admin/expire get `UPI_ID`, `UPI_PAYEE_NAME`, `PAYMENT_WINDOW_MINUTES`. |
 | EventBridge Scheduler | `wmh-expire-unpaid-upi` + IAM role `wmh-scheduler` | AWS's managed timer: runs `wmh-expire` every 10 minutes. Its role may invoke only that function. Free at this volume. |
-| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 29 routes, a JWT authorizer on `/me`, `/addresses`, `/orders` and `/admin/*` (admin.py also checks the `admin` group), throttled to 50 req/s (burst 100). |
+| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 38 routes, a JWT authorizer on `/me`, `/addresses`, `/orders`, `/admin/*` and `/delivery/*` (admin.py / delivery.py also check the `admin` / `delivery` group), throttled to 50 req/s (burst 100). |
 | S3 bucket | `wmh-media-630287363216` | Menu photos under `menu/`. Fully private: all public access blocked. |
 | CloudFront | `d2n5hm5b49hk3p.cloudfront.net` | CDN in front of the bucket (price class 200, includes India). The only reader of the bucket, via Origin Access Control. |
 | CloudWatch log groups | `/aws/lambda/wmh-*`, `/aws/apigateway/wmh-api` | 14-day retention. Access logs never include headers or bodies. |
@@ -93,11 +98,19 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `POST /admin/products` | JWT + admin | `{category_id, name, price, name_mr?, description?, image_url?, is_veg?, has_spice_level?, is_available?, is_active?}` | `201 AdminProduct` |
 | `PATCH /admin/products/{id}` | JWT + admin | any of the POST fields | `200 AdminProduct` |
 | `PATCH /admin/store` | JWT + admin | `{accepting_orders: bool, message?}` (message ≤ 120 chars) | `200 {…StoreStatus, updated_at, updated_by}` |
+| `POST /admin/orders/{id}/assign` | JWT + admin | `{delivery_boy_id}` | `200 AdminOrder` (status `ASSIGNED`; same person again → `auto_assign: "unchanged"`) |
+| `GET /admin/delivery-boys` | JWT + admin | – | `200 DeliveryBoy[]` `{id, name, phone, on_duty, active_orders, last_assigned_at}`, on duty first |
+| `PATCH /admin/delivery-boys/{id}` | JWT + admin | `{on_duty: false}` | `200 DeliveryBoy` (only the delivery boy can switch himself on) |
+| `GET /delivery/me` | JWT + delivery | – | `200 DeliveryBoy` (registers him the first time) |
+| `PATCH /delivery/me` | JWT + delivery | `{on_duty: bool}` | `200 DeliveryBoy` (on duty needs a phone on his profile: `400 PHONE_REQUIRED`) |
+| `GET /delivery/orders` | JWT + delivery | – | `200 DeliveryOrder[]`: his active deliveries (full details) and today's finished ones (summary) |
+| `POST /delivery/orders/{id}/status` | JWT + delivery | `{status: OUT_FOR_DELIVERY \| DELIVERED}` | `200 DeliveryOrder` |
 
 Menu responses carry `Cache-Control: public, max-age=60`, so menu edits show up within a minute.
 
 `token` is the Cognito **ID token**. Send it as `Authorization: Bearer <token>`.
-`User` is exactly `src/types/index.ts` → `User`: `{id, name, phone, email, role, is_active}`.
+`User` is exactly `src/types/index.ts` → `User`: `{id, name, phone, email, role, roles, is_active}`.
+`roles` (Part 7c) lists staff groups, e.g. `["admin", "delivery"]`; `role` stays `"admin"` / `"customer"`.
 
 Address rules (all enforced by the server):
 - **Delivery area**: the GPS position must be within **3 km** (straight line) of the hotel,
@@ -116,7 +129,7 @@ Order rules (all enforced by the server; the app shows the same ones):
 - **Bill**: subtotal + ₹30 delivery + 5% GST on the subtotal, rounded half up, integer paise.
 - **Minimum order ₹100 of food** (subtotal, before delivery and GST) → else `422 BELOW_MINIMUM_ORDER`.
   Change `min_order_paise` in `terraform/variables.tf` (and `MIN_ORDER_PAISE` in the app's `pricing.ts`).
-- **Payment**: `cod` starts `CONFIRMED`, `payment_status: "pending"` (paid on delivery). `online` = direct UPI
+- **Payment**: `cod` starts `PENDING` (waits for the kitchen to confirm, Part 7c), `payment_status: "pending"` (paid on delivery). `online` = direct UPI
   (Part 7, below); if no UPI ID is configured it's `400 PAYMENT_METHOD_UNAVAILABLE`.
 - **Delivery hours 9 AM – 9 PM**, 12 one-hour slots (`SLOTS` in `orders.py`, `slot_09` … `slot_20`):
   Morning 9–10, 10–11, 11–12 · Afternoon 12–1 … 4–5 · Evening 5–6 … 8–9. `slot_label` must be one of these
@@ -132,7 +145,8 @@ Order rules (all enforced by the server; the app shows the same ones):
 - **No double orders**: the same `Idempotency-Key` + same body within 24 h returns the first order
   (`Idempotent-Replayed: true` header); same key + different body → `409 IDEMPOTENCY_CONFLICT`. The order
   and the key record are written in one DynamoDB transaction, so two simultaneous retries can't both win.
-- **Cancel** only while `PENDING_PAYMENT` or `CONFIRMED` → else `409 ORDER_NOT_CANCELLABLE`.
+- **Cancel** only while `PENDING`, `PENDING_PAYMENT` or `CONFIRMED` (before a delivery boy is assigned) → else `409 ORDER_NOT_CANCELLABLE`.
+- Once assigned, `Order.delivery_boy = {name, phone}` (just `{name}` once delivered).
 - Stored but not returned: `GSI1PK = ORDERDATE#<delivery_date>`, `GSI1SK = <slot hour>#<created_at>#<id>`,
   ready for the Part 6 kitchen index ("all orders for a day, by slot") without a data migration.
 
@@ -157,18 +171,41 @@ a person checks the hotel's UPI app.
 
 Admin rules (Part 6):
 - **Who**: accounts in the Cognito group `admin`; everyone else gets `403 FORBIDDEN` on `/admin/*`.
-- **Status moves**, one step at a time: `(PENDING_PAYMENT →) CONFIRMED → PREPARING → OUT_FOR_DELIVERY → DELIVERED`; anything else
-  is `409 INVALID_STATUS_CHANGE`. `DELIVERED` also sets `payment_status: "paid"` for cash orders. Each move is
+- **Status moves** (Part 7c), one step at a time: `PENDING / PENDING_PAYMENT → CONFIRMED → ASSIGNED → OUT_FOR_DELIVERY → DELIVERED`;
+  anything else is `409 INVALID_STATUS_CHANGE`. `CONFIRMED → ASSIGNED` happens by assignment (automatic on confirm,
+  or `POST /admin/orders/{id}/assign`). Admins may also do `ASSIGNED → OUT_FOR_DELIVERY` and `→ DELIVERED`
+  (fallback for the delivery boy). Orders from before Part 7c may be `PREPARING → OUT_FOR_DELIVERY`. `DELIVERED` also sets `payment_status: "paid"` for cash orders. Each move is
   conditional on the status the admin saw, so two people tapping at once can't skip a step (`409 ORDER_CHANGED`).
 - **Kitchen cancel**: any order not yet delivered, with a `reason` of 3–120 characters, shown to the customer
   as `cancel_reason` (`cancelled_by: "kitchen"`). Customer cancels record `cancelled_by: "customer"`; UPI
   auto-cancels `cancelled_by: "system"`.
-- `AdminOrder` = `Order` + `status_history: [{status, at, by}]` (`by` = `"customer"` or the admin's email).
+- `AdminOrder` = `Order` + `status_history: [{status, at, by}]` (`by` = `"customer"`, `"auto"`, `"system"` or a staff email)
+  + `delivery_boy {id, name, phone}`, `assigned_at`, `assigned_by` (`"auto"` or the admin's email).
 - **Menu**: `AdminProduct` = `Product` + `is_active`. `is_active: false` hides a dish from `GET /products` and
   ordering it gives `409 PRODUCT_UNAVAILABLE`; `is_available: false` shows it as sold out. Prices ₹1–₹5,000
   (100–500000 paise). New ids come from the name (`prd_kanda_bhaji`), with a random suffix if taken.
   New dishes use their category's photo until photo upload exists (Part 6b). There's no delete: hide instead.
 - Orders placed before Part 6 have no `ORDERREF` record, so the kitchen can't move them (`404`).
+
+Delivery boys (Part 7c):
+- **Who**: accounts in the Cognito group `delivery` (`403 FORBIDDEN` on `/delivery/*` otherwise). The first
+  `GET /delivery/me` creates his record (`DELIVERY` / `BOY#<sub>`) from his profile (name, phone).
+- **On duty** lasts for the IST day it was switched on (resets at midnight). Going on duty needs a mobile number
+  on his profile (`400 PHONE_REQUIRED`). Admins can take someone off duty, not on.
+- **Confirm = auto-assign**: `POST /admin/orders/{id}/status {status: "CONFIRMED"}` confirms the order and, in the
+  same DynamoDB transaction, assigns it to the on-duty delivery boy with the fewest active deliveries
+  (`ASSIGNED` + `OUT_FOR_DELIVERY`; tie → longest since his last order). The transaction also checks he is still on
+  duty; if not, the next one is tried. Nobody on duty → the order stays `CONFIRMED`, `auto_assign: "none_available"`,
+  and the app offers manual assignment. Confirming an already confirmed / assigned order changes nothing
+  (`auto_assign: "unchanged"`), so double taps or two admins can't assign twice.
+- **Manual assign / reassign** while `CONFIRMED` or `ASSIGNED` (any registered delivery boy, on duty or not);
+  conditional on who had it, so two admins can't fight over it silently.
+- **Delivery boy's view** (`DeliveryOrder`): only orders assigned to him (others answer `404`). While `ASSIGNED` /
+  `OUT_FOR_DELIVERY` he gets `customer {name, phone}`, `address {line1, line2?, landmark?, city, state, pincode,
+  latitude, longitude}`, items and `collect_cash` (paise; 0 if paid by UPI). Finished orders keep only the order
+  number, area and status. `state` is always Maharashtra (addresses don't store one).
+- He moves `ASSIGNED → OUT_FOR_DELIVERY` ("Picked up") → `DELIVERED` (cash marked paid). A double tap is harmless;
+  a kitchen-cancelled order answers `409` "Please don't deliver it".
 
 Store switch (Part 7b):
 - One item, `PK = "SETTINGS"`, `SK = "STORE"`: `accepting_orders`, `message`, `updated_at`, `updated_by`.
@@ -188,7 +225,7 @@ Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PAS
 `BELOW_MINIMUM_ORDER` (422), `PAYMENT_METHOD_UNAVAILABLE`, `SLOT_UNAVAILABLE` (409),
 `PRODUCT_UNAVAILABLE` (409), `IDEMPOTENCY_CONFLICT` (409), `ORDER_NOT_CANCELLABLE` (409), `CONFLICT` (409),
 `FORBIDDEN` (403), `INVALID_STATUS_CHANGE` (409), `ORDER_CHANGED` (409),
-`UTR_ALREADY_USED` (409), `ORDER_NOT_PAYABLE` (409), `STORE_CLOSED` (409),
+`UTR_ALREADY_USED` (409), `ORDER_NOT_PAYABLE` (409), `STORE_CLOSED` (409), `PHONE_REQUIRED` (400),
 `EMAIL_DELIVERY_FAILED` (502), `EMAIL_CHANGE_NOT_SUPPORTED`, `CHALLENGE_REQUIRED`,
 `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`.
 
@@ -254,7 +291,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-250 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
+296 tests. moto doesn't implement `revoke_token` or `resend_confirmation_code`; those two are tested
 with mocks, and `verify-auth.ps1` checks them for real.
 
 ## Verify after deploy
@@ -292,7 +329,8 @@ cancels it, so one cancelled order stays in that account's history:
 ```
 
 The kitchen and menu admin need an account in the `admin` group (see below). The script places one
-real order for tomorrow, moves it to Preparing, then cancels it from the kitchen; the menu is only read:
+real order for tomorrow, confirms it, then cancels it from the kitchen; the menu is only read. If a delivery
+boy is on duty, the test order is assigned to him for a moment (he sees it cancelled):
 
 ```powershell
 .\backend\scripts\verify-admin.ps1 -Email owner@example.com -CustomerEmail you+wmh1@gmail.com
@@ -310,6 +348,14 @@ Store switch (uses an admin account; online orders are off for about 2 seconds, 
 .\backend\scripts\verify-store.ps1 -Email owner@example.com -CustomerEmail you+wmh1@gmail.com
 ```
 
+Delivery boys (Part 7c) need an admin account and an account in the `delivery` group with a phone number
+(can be the same account). One real order for tomorrow goes Confirm → assigned → Picked up, then is cancelled;
+his duty status is put back as it was:
+
+```powershell
+.\backend\scripts\verify-delivery.ps1 -Email owner@example.com -DeliveryEmail ramu@example.com
+```
+
 If PowerShell blocks a script: `Set-ExecutionPolicy -Scope Process Bypass`.
 
 Logs, if something fails:
@@ -320,6 +366,7 @@ aws logs tail /aws/lambda/wmh-catalog --since 15m --profile wmh --region ap-sout
 aws logs tail /aws/lambda/wmh-addresses --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-orders --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-admin --since 15m --profile wmh --region ap-south-1
+aws logs tail /aws/lambda/wmh-delivery --since 15m --profile wmh --region ap-south-1
 aws logs tail /aws/lambda/wmh-expire --since 1h --profile wmh --region ap-south-1
 aws logs tail /aws/apigateway/wmh-api --since 15m --profile wmh --region ap-south-1
 ```
@@ -351,6 +398,23 @@ aws cognito-idp admin-remove-user-from-group --user-pool-id ap-south-1_Szcz11NPr
 The group travels inside the login token, so **log out and back in** in the app afterwards (or wait up
 to an hour for the automatic token refresh). The Kitchen tab and Account → Kitchen tools → Manage menu
 then appear. This is done by hand on purpose, so no one's email is committed to this public repo.
+
+## Add a delivery boy
+
+Same as an admin, with the group `delivery`:
+
+1. The person **signs up in the app** (email + password + mobile number) and confirms the email.
+2. Add them to the group: Cognito → User pools → `wmh-users` → **Groups** → `delivery` → **Add user to group**, or
+
+   ```powershell
+   aws cognito-idp admin-add-user-to-group --user-pool-id ap-south-1_Szcz11NPr --username ramu@example.com --group-name delivery --profile wmh --region ap-south-1
+   ```
+3. They **log out and log in again**. A **Deliveries** tab appears; they open it once (that registers them) and
+   switch **On duty**. From then on, confirmed orders are assigned to them automatically.
+
+To remove someone: in the Kitchen tab open **Assign** on any confirmed order and tap **Off duty** next to
+their name (so auto-assign skips them), reassign anything they still have, then remove them from the group in
+Cognito. Their old orders keep their name.
 
 ## Change the UPI ID
 

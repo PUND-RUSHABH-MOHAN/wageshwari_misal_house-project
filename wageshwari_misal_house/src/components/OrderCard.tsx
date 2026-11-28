@@ -15,11 +15,14 @@ import {
   ORDER_STATUS_LABELS,
   SPICE_LABELS,
 } from '@/utils/format';
+import { callPhone } from '@/utils/maps';
 
 const STATUS_COLORS: Record<OrderStatus, { fg: string; bg: string }> = {
+  PENDING: { fg: Colors.warning, bg: Colors.warningSoft },
   PENDING_PAYMENT: { fg: Colors.warning, bg: Colors.warningSoft },
   CONFIRMED: { fg: Colors.info, bg: Colors.infoSoft },
   PREPARING: { fg: Colors.primaryDark, bg: Colors.primarySoft },
+  ASSIGNED: { fg: Colors.primaryDark, bg: Colors.primarySoft },
   OUT_FOR_DELIVERY: { fg: '#6A1B9A', bg: '#F3E5F5' },
   DELIVERED: { fg: Colors.success, bg: Colors.successSoft },
   CANCELLED: { fg: Colors.danger, bg: Colors.dangerSoft },
@@ -35,20 +38,46 @@ export function StatusBadge({ status }: { status: OrderStatus }) {
   );
 }
 
+// Part 7c: Pending -> Confirmed -> Assigned -> Out for delivery -> Delivered.
 const TIMELINE: { status: OrderStatus; title: string; hint: string; icon: IconName }[] = [
-  { status: 'CONFIRMED', title: 'Order confirmed', hint: 'Kitchen has received your order', icon: 'checkCircle' },
-  { status: 'PREPARING', title: 'Preparing', hint: 'Tarri is simmering, pav is toasting', icon: 'flame' },
-  { status: 'OUT_FOR_DELIVERY', title: 'Out for delivery', hint: 'Rider is on the way', icon: 'bag' },
+  { status: 'CONFIRMED', title: 'Order confirmed', hint: 'The hotel accepted your order', icon: 'checkCircle' },
+  { status: 'ASSIGNED', title: 'Delivery boy assigned', hint: 'Your misal is being packed', icon: 'delivery' },
+  { status: 'OUT_FOR_DELIVERY', title: 'Out for delivery', hint: 'On the way to you', icon: 'bag' },
   { status: 'DELIVERED', title: 'Delivered', hint: 'Enjoy your misal!', icon: 'home' },
 ];
 const RANK: Record<OrderStatus, number> = {
+  PENDING: -1,
   PENDING_PAYMENT: -1,
   CONFIRMED: 0,
-  PREPARING: 1,
+  PREPARING: 0, // orders from before part 7c
+  ASSIGNED: 1,
   OUT_FOR_DELIVERY: 2,
   DELIVERED: 3,
   CANCELLED: -2,
 };
+
+/** "Ramu is bringing your order · Call" while a delivery boy has it. */
+export function DeliveryBoyRow({ order }: { order: Order }) {
+  const boy = order.delivery_boy;
+  if (!boy?.phone || (order.status !== 'ASSIGNED' && order.status !== 'OUT_FOR_DELIVERY')) return null;
+  return (
+    <View style={styles.boyRow}>
+      <Icon name="delivery" size={18} color={Colors.primaryDark} />
+      <Text style={styles.boyText} numberOfLines={2}>
+        <Text style={styles.boyName}>{boy.name || 'Your delivery boy'}</Text>
+        {order.status === 'OUT_FOR_DELIVERY' ? ' is on the way' : ' will bring your order'}
+      </Text>
+      <Pressable
+        onPress={() => callPhone(boy.phone!)}
+        hitSlop={8}
+        style={styles.boyCall}
+        accessibilityLabel={`Call ${boy.name || 'the delivery boy'}`}>
+        <Icon name="phone" size={16} color={Colors.white} />
+        <Text style={styles.boyCallText}>Call</Text>
+      </Pressable>
+    </View>
+  );
+}
 
 export function OrderTimeline({ order }: { order: Order }) {
   const { status } = order;
@@ -69,6 +98,14 @@ export function OrderTimeline({ order }: { order: Order }) {
   const current = RANK[status];
   return (
     <View>
+      {status === 'PENDING' ? (
+        <View style={[styles.notice, { backgroundColor: Colors.warningSoft, marginBottom: Spacing.md }]}>
+          <Icon name="clock" size={16} color={Colors.warning} />
+          <Text style={[styles.noticeText, { color: Colors.warning }]}>
+            Waiting for the hotel to confirm your order.
+          </Text>
+        </View>
+      ) : null}
       {status === 'PENDING_PAYMENT' ? (
         <View style={[styles.notice, { backgroundColor: Colors.warningSoft, marginBottom: Spacing.md }]}>
           <Icon name="clock" size={16} color={Colors.warning} />
@@ -101,7 +138,13 @@ export function OrderTimeline({ order }: { order: Order }) {
                 {step.title}
                 {active ? '  •  Now' : ''}
               </Text>
-              <Text style={styles.stepHint}>{step.hint}</Text>
+              <Text style={styles.stepHint}>
+                {step.status === 'ASSIGNED' && order.delivery_boy?.name
+                  ? `${order.delivery_boy.name} will bring your order`
+                  : step.status === 'DELIVERED' && status === 'DELIVERED' && order.delivery_boy?.name
+                    ? `Delivered by ${order.delivery_boy.name}. Enjoy your misal!`
+                    : step.hint}
+              </Text>
             </View>
           </View>
         );
@@ -155,6 +198,8 @@ export function OrderCard({
           </View>
         </View>
       </Pressable>
+
+      <DeliveryBoyRow order={order} />
 
       {/* UPI order not paid yet: straight to the Pay screen */}
       {order.status === 'PENDING_PAYMENT' && order.payment_status === 'pending' && order.upi_payment ? (
@@ -344,4 +389,26 @@ const styles = StyleSheet.create({
   stepTitle: { fontSize: 14, fontWeight: '700', color: Colors.text },
   stepTitleTodo: { color: Colors.textSubtle },
   stepHint: { fontSize: 12, color: Colors.textMuted, marginTop: 1 },
+
+  boyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginTop: Spacing.md,
+    padding: Spacing.md,
+    borderRadius: Radius.md,
+    backgroundColor: Colors.primarySoft,
+  },
+  boyText: { flex: 1, fontSize: 13, color: Colors.primaryDark },
+  boyName: { fontWeight: '800' },
+  boyCall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 6,
+    borderRadius: Radius.pill,
+    backgroundColor: Colors.primary,
+  },
+  boyCallText: { fontSize: 13, fontWeight: '800', color: Colors.white },
 });

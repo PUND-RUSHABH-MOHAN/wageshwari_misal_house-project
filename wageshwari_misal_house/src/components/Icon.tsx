@@ -32,6 +32,7 @@ const ICONS = {
   upi: { ios: 'qrcode', md: 'qr_code' },
   bag: { ios: 'bag.fill', md: 'shopping_bag' },
   store: { ios: 'storefront.fill', md: 'storefront' },
+  delivery: { ios: 'bicycle', md: 'delivery_dining' },
   radioOn: { ios: 'largecircle.fill.circle', md: 'radio_button_checked' },
   radioOff: { ios: 'circle', md: 'radio_button_unchecked' },
   eye: { ios: 'eye', md: 'visibility' },
