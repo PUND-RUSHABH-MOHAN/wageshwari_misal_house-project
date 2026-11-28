@@ -106,7 +106,7 @@ Adding an address needs the phone's GPS position ("Use my current location", `ex
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
 
-**Part 7c (delivery boys; backend plan ready, apply pending):** accounts in the Cognito `delivery` group
+**Live (Part 7c, backend deployed 2026-11-28; needs this app build):** delivery boys. accounts in the Cognito `delivery` group
 (how to add one: `backend/README.md` → "Add a delivery boy") get a **Deliveries** tab:
 - an **On duty** switch (resets at midnight; needs a mobile number on the Account tab),
 - their assigned orders with the customer's name and **Call**, the full address with a **map** button, the
@@ -224,10 +224,10 @@ or *Maps SDK for Android* isn't enabled.
 | Pay (UPI) | `submitPayment()` | `POST /orders/:id/payment` `{utr}` | **live** (`src/app/pay/[id].tsx`) |
 | Kitchen (admins) | order board | `GET /admin/orders?date=` | **live** (`src/app/(tabs)/kitchen.tsx`) |
 | Kitchen (admins) | Confirm (+ auto-assign) / next step / cancel | `POST /admin/orders/:id/status` | **live** |
-| Kitchen (admins) | assign / reassign | `GET /admin/delivery-boys`, `POST /admin/orders/:id/assign` | Part 7c (`AssignSheet.tsx`) |
-| Kitchen (admins) | take a delivery boy off duty | `PATCH /admin/delivery-boys/:id` `{on_duty: false}` | Part 7c (`AssignSheet.tsx`) |
-| Deliveries (delivery boys) | on duty | `GET /delivery/me`, `PATCH /delivery/me` `{on_duty}` | Part 7c (`src/app/(tabs)/deliveries.tsx`) |
-| Deliveries (delivery boys) | my orders / Picked up / Delivered | `GET /delivery/orders`, `POST /delivery/orders/:id/status` | Part 7c |
+| Kitchen (admins) | assign / reassign | `GET /admin/delivery-boys`, `POST /admin/orders/:id/assign` | **live** (`AssignSheet.tsx`) |
+| Kitchen (admins) | take a delivery boy off duty | `PATCH /admin/delivery-boys/:id` `{on_duty: false}` | **live** (`AssignSheet.tsx`) |
+| Deliveries (delivery boys) | on duty | `GET /delivery/me`, `PATCH /delivery/me` `{on_duty}` | **live** (`src/app/(tabs)/deliveries.tsx`) |
+| Deliveries (delivery boys) | my orders / Picked up / Delivered | `GET /delivery/orders`, `POST /delivery/orders/:id/status` | **live** |
 | Kitchen (admins) | "Taking online orders" switch | `PATCH /admin/store` `{accepting_orders, message?}` | **live** (`AppContext` → `setAcceptingOrders`) |
 | Manage menu (admins) | lists | `GET /admin/categories`, `GET /admin/products` | **live** (`src/app/admin-menu.tsx`) |
 | Manage menu (admins) | add / edit | `POST`/`PATCH /admin/categories`, `POST`/`PATCH /admin/products` | **live** |
