@@ -106,7 +106,7 @@ Adding an address needs the phone's GPS position ("Use my current location", `ex
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
 
-**Live (Part 7c, backend deployed 2026-11-28; needs this app build):** delivery boys. accounts in the Cognito `delivery` group
+**Live (Part 7c, backend deployed 2026-11-28; needs this app build):** delivery boys. Accounts in the Cognito `delivery` group
 (how to add one: `backend/README.md` → "Add a delivery boy") get a **Deliveries** tab:
 - an **On duty** switch (resets at midnight; needs a mobile number on the Account tab),
 - their assigned orders with the customer's name and **Call**, the full address with a **map** button, the
