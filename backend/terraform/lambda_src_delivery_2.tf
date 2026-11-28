@@ -2,6 +2,9 @@
 
 locals {
   lambda_src_delivery_2 = <<PYSRC
+            "latitude": snap.get("latitude"),
+            "longitude": snap.get("longitude"),
+        }
         unpaid_cash = item.get("payment_method") == "cod" and item.get("payment_status") != "paid"
         out["collect_cash"] = int(item["total"]) if unpaid_cash else 0
         out["assigned_at"] = item.get("assigned_at")
@@ -9,8 +12,10 @@ locals {
         out["items"] = []  # finished: keep just the summary
         if item.get("delivered_at"):
             out["delivered_at"] = item["delivered_at"]
-        if item["status"] == "CANCELLED" and item.get("cancel_reason"):
-            out["cancel_reason"] = item["cancel_reason"]
+        if item["status"] == "CANCELLED":
+            out["cancelled_by"] = item.get("cancelled_by")
+            if item.get("cancel_reason"):
+                out["cancel_reason"] = item["cancel_reason"]
     return _plain(out)
 
 
@@ -53,6 +58,7 @@ def list_orders(event: dict) -> dict:
         key=lambda i: (
             i["status"] not in delivery_boys.ACTIVE,  # active first
             i["delivery_date"],
+            i.get("estimated_delivery_at") or "",
             int(i.get("slot_start_hour", 0)),
             i.get("created_at", ""),
         )
@@ -68,12 +74,5 @@ def _my_order(claims: dict, order_id: str) -> dict:
         raise ApiError(404, "NOT_FOUND", "Order not found.")
     item = orders._get_order_item(ref["user_id"], order_id)
     if item.get("delivery_boy_id") != claims["sub"]:
-        raise ApiError(404, "NOT_FOUND", "Order not found.")  # not his: don't reveal it exists
-    return item
-
-
-def change_status(event: dict) -> dict:
-    claims = _delivery(event)
-    body = parse_body(event)
 PYSRC
 }

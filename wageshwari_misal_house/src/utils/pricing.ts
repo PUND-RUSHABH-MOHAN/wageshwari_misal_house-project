@@ -1,4 +1,4 @@
-import type { BillBreakdown, CartItem, DeliverySlot, Paise } from '@/types';
+import type { BillBreakdown, CartItem, Paise } from '@/types';
 
 /** Flat delivery fee: ₹30. */
 export const DELIVERY_FEE_PAISE: Paise = 3000;
@@ -19,27 +19,6 @@ export function computeBill(cart: CartItem[]): BillBreakdown {
 }
 
 /**
- * One-hour delivery slots, 9 AM – 9 PM IST. Mirrors SLOTS in backend/src/orders.py: the server
- * accepts only these exact labels (`${name} ${time}`), so change both together.
- */
-export const DELIVERY_SLOTS: DeliverySlot[] = [
-  { id: 'slot_09', name: 'Morning', time: '9:00 - 10:00 AM', start_hour: 9 },
-  { id: 'slot_10', name: 'Morning', time: '10:00 - 11:00 AM', start_hour: 10 },
-  { id: 'slot_11', name: 'Morning', time: '11:00 AM - 12:00 PM', start_hour: 11 },
-  { id: 'slot_12', name: 'Afternoon', time: '12:00 - 1:00 PM', start_hour: 12 },
-  { id: 'slot_13', name: 'Afternoon', time: '1:00 - 2:00 PM', start_hour: 13 },
-  { id: 'slot_14', name: 'Afternoon', time: '2:00 - 3:00 PM', start_hour: 14 },
-  { id: 'slot_15', name: 'Afternoon', time: '3:00 - 4:00 PM', start_hour: 15 },
-  { id: 'slot_16', name: 'Afternoon', time: '4:00 - 5:00 PM', start_hour: 16 },
-  { id: 'slot_17', name: 'Evening', time: '5:00 - 6:00 PM', start_hour: 17 },
-  { id: 'slot_18', name: 'Evening', time: '6:00 - 7:00 PM', start_hour: 18 },
-  { id: 'slot_19', name: 'Evening', time: '7:00 - 8:00 PM', start_hour: 19 },
-  { id: 'slot_20', name: 'Evening', time: '8:00 - 9:00 PM', start_hour: 20 },
-];
-
-export const slotLabel = (slot: DeliverySlot) => `${slot.name} ${slot.time}`;
-
-/**
  * Smallest food subtotal (before delivery and GST) the server accepts: ₹100.
  * Mirrors MIN_ORDER_PAISE on the orders Lambda (backend/terraform/variables.tf).
  */
@@ -50,7 +29,7 @@ export const shortOfMinimum = (bill: Pick<BillBreakdown, 'subtotal'>): Paise =>
   Math.max(0, MIN_ORDER_PAISE - bill.subtotal);
 
 // ---------------------------------------------------------------------------
-// India time. Slots, "today" and kitchen hours follow the hotel's clock (IST, UTC+05:30,
+// India time. "Today", kitchen hours and delivery times follow the hotel's clock (IST, UTC+05:30,
 // no daylight saving), not the phone's time zone, so the app agrees with the server even
 // on a phone or emulator set to another zone.
 // ---------------------------------------------------------------------------
@@ -76,17 +55,33 @@ export function istClockTime(iso: string): string {
   return `${h % 12 === 0 ? 12 : h % 12}:${pad2(d.getUTCMinutes())} ${h < 12 ? 'AM' : 'PM'}`;
 }
 
-/** Same-day slots close 30 minutes before they start (IST). */
-export function isSlotAvailable(slot: DeliverySlot, isToday: boolean, now: Date = new Date()): boolean {
-  if (!isToday) return true;
-  return istMinutes(now) < slot.start_hour * 60 - 30;
-}
-
-/** Online delivery hours: 9:00 AM – 9:00 PM IST (store.py OPEN_HOUR / CLOSE_HOUR). */
+/**
+ * Online ordering hours (part 7d): 9:00 AM – 8:30 PM IST, matching store.py OPEN_HOUR / LAST_ORDER.
+ * Delivery runs until 9 PM. The server has the final say (409 KITCHEN_CLOSED); this only lets
+ * the app say so before the customer taps Place order.
+ */
 export const KITCHEN_OPEN_HOUR = 9;
 export const KITCHEN_CLOSE_HOUR = 21;
+export const LAST_ORDER_MINUTES = 20 * 60 + 30;
 
-export function isKitchenOpen(now: Date = new Date()): boolean {
-  const h = Math.floor(istMinutes(now) / 60);
-  return h >= KITCHEN_OPEN_HOUR && h < KITCHEN_CLOSE_HOUR;
+/** Can an order be placed right now (by the clock)? */
+export function isOrderingOpen(now: Date = new Date()): boolean {
+  const m = istMinutes(now);
+  return m >= KITCHEN_OPEN_HOUR * 60 && m <= LAST_ORDER_MINUTES;
+}
+
+/** @deprecated part 7d: use isOrderingOpen (orders stop at 8:30 PM). */
+export const isKitchenOpen = isOrderingOpen;
+
+/** Whole minutes from now until an ISO time (never below 0). */
+export function minutesUntil(iso: string, now: Date = new Date()): number {
+  return Math.max(0, Math.ceil((new Date(iso).getTime() - now.getTime()) / 60000));
+}
+
+/** "about 35 min" / "about 1 hr 10 min" */
+export function aboutMinutes(minutes: number): string {
+  if (minutes < 60) return `about ${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `about ${h} hr${m ? ` ${m} min` : ''}`;
 }

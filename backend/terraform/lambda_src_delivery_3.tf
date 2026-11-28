@@ -2,6 +2,13 @@
 
 locals {
   lambda_src_delivery_3 = <<PYSRC
+        raise ApiError(404, "NOT_FOUND", "Order not found.")  # not his: don't reveal it exists
+    return item
+
+
+def change_status(event: dict) -> dict:
+    claims = _delivery(event)
+    body = parse_body(event)
     if set(body) != {"status"} or body["status"] not in ("OUT_FOR_DELIVERY", "DELIVERED"):
         raise ApiError(400, "VALIDATION_ERROR", "`status` must be OUT_FOR_DELIVERY or DELIVERED.")
     new = body["status"]
@@ -11,13 +18,17 @@ locals {
         return response(200, to_delivery_order(order))  # double tap: nothing changes
     if NEXT.get(current) != new:
         if current == "CANCELLED":
-            message = "The hotel cancelled this order. Please don't deliver it."
+            who = "The customer" if order.get("cancelled_by") == "customer" else "The hotel"
+            message = f"{who} cancelled this order. Please don't deliver it."
         else:
             message = f"This order is {current.lower().replace('_', ' ')}; it can't go to {new.lower().replace('_', ' ')}."
         raise ApiError(409, "INVALID_STATUS_CHANGE", message)
     now = _now()
     sets: list[str] = []
     values: dict[str, Any] = {}
+    if new == "OUT_FOR_DELIVERY":  # picked up: the estimate becomes now + travel (part 7d)
+        sets.append("estimated_delivery_at = :eta")
+        values[":eta"] = eta.after_pickup(orders._now_utc(), eta.travel_for(order))
     if new == "DELIVERED":
         sets.append("delivered_at = :now")
         if order.get("payment_method") == "cod":

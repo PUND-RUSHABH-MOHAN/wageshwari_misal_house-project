@@ -1,11 +1,14 @@
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import boto3
 import pytest
+from boto3.dynamodb.conditions import Key
 
 import addresses
+import eta
 import orders
 from conftest import REGION, TABLE
 
@@ -16,8 +19,8 @@ IST = timezone(timedelta(hours=5, minutes=30))
 ALICE = {"sub": "aaaaaaaa-0000-0000-0000-000000000001", "email": "alice@example.com"}
 BOB = {"sub": "bbbbbbbb-0000-0000-0000-000000000002", "email": "bob@example.com"}
 
-# 06:00 IST on 13 Nov 2026: every slot today is still open (the 9 AM slot closes 08:30).
-SIX_AM = datetime(2026, 11, 13, 6, 0, tzinfo=IST)
+# 10:00 IST on 13 Nov 2026: inside ordering hours (9:00 AM - 8:30 PM).
+TEN_AM = datetime(2026, 11, 13, 10, 0, tzinfo=IST)
 TODAY, TOMORROW = "2026-11-13", "2026-11-14"
 EARLY = "Morning 9:00 - 10:00 AM"  # first slot of the day
 MORNING = "Morning 10:00 - 11:00 AM"
@@ -25,7 +28,7 @@ MORNING = "Morning 10:00 - 11:00 AM"
 
 @pytest.fixture
 def clock(monkeypatch):
-    state = {"now": SIX_AM}
+    state = {"now": TEN_AM}
     monkeypatch.setattr(orders, "_now_utc", lambda: state["now"].astimezone(timezone.utc))
     return state
 
@@ -130,8 +133,13 @@ def test_place_order_happy_path(env):
     assert o["status"] == "PENDING" and o["payment_status"] == "pending" and o["payment_method"] == "cod"
     assert o["user_id"] == ALICE["sub"]
     assert (o["subtotal"], o["delivery_fee"], o["tax"], o["total"]) == (21000, 3000, 1050, 25050)
-    assert o["delivery_date"] == TODAY and o["slot_label"] == MORNING
-    assert o["created_at"] == "2026-11-13T00:30:00.000Z"
+    # Part 7d: always today; the slot sent by an old app build is ignored; the server sets the time.
+    assert o["delivery_date"] == TODAY and "slot_label" not in o
+    assert o["created_at"] == "2026-11-13T04:30:00.000Z"  # 10:00 IST
+    # 1.7 km: travel 5 + 4/km = 12 min; cooking 20 min -> 10:32, rounded up to 10:35 IST
+    assert (o["prep_minutes"], o["travel_minutes"]) == (20, 12)
+    assert o["estimated_delivery_at"] == o["original_estimated_delivery_at"] == "2026-11-13T05:05:00.000Z"
+    assert "delayed" not in o
     first, second = o["items"]
     assert first == {
         "id": "oit_1", "order_id": o["id"], "product_id": "prd_misal_pav", "product_name": "Misal Pav",
@@ -150,8 +158,9 @@ def test_stored_item_has_admin_index_fields(env):
     _, o, _ = place(adr)
     item = env["table"].get_item(Key={"PK": f"USER#{ALICE['sub']}", "SK": f"ORDER#{o['id']}"})["Item"]
     assert item["GSI1PK"] == f"ORDERDATE#{TODAY}"
-    assert item["GSI1SK"].startswith("10#2026-11-13T00:30:00.000Z#")
-    assert item["slot_id"] == "slot_10"
+    assert item["GSI1SK"].startswith("10#2026-11-13T04:30:00.000Z#")  # hour placed (IST)
+    assert item["placed_at"] == "2026-11-13T04:30:00.000Z"
+    assert "slot_id" not in item and "slot_label" not in item
 
 
 def test_server_ignores_client_prices_and_uses_menu(env):
@@ -186,11 +195,11 @@ def test_order_numbers_count_per_ist_day(env):
     adr = make_address()
     assert place(adr, key="key-aaaa-1")[1]["order_number"] == "WMH-20261113-0001"
     assert place(adr, key="key-aaaa-2")[1]["order_number"] == "WMH-20261113-0002"
-    # 00:10 IST on the 14th is still 18:40 on the 13th in UTC; numbering follows India's date.
-    env["clock"]["now"] = datetime(2026, 11, 14, 0, 10, tzinfo=IST)
-    status, o, _ = place(adr, key="key-aaaa-3", delivery_date="2026-11-14")
+    # 09:10 IST on the 14th is still 03:40 UTC; numbering follows India's date.
+    env["clock"]["now"] = datetime(2026, 11, 14, 9, 10, tzinfo=IST)
+    status, o, _ = place(adr, key="key-aaaa-3")
     assert status == 201, o
-    assert o["order_number"] == "WMH-20261114-0001"
+    assert o["order_number"] == "WMH-20261114-0001" and o["delivery_date"] == "2026-11-14"
 
 
 # ---------------------------------------------------------------- idempotency
@@ -208,7 +217,7 @@ def test_same_key_same_body_returns_first_order(env):
 def test_replay_works_even_after_slot_closes(env):
     adr = make_address()
     _, first, _ = place(adr, key="retry-key-2", slot_label=EARLY)
-    env["clock"]["now"] = SIX_AM + timedelta(hours=3)  # 09:00: the 9 AM slot is now closed
+    env["clock"]["now"] = TEN_AM + timedelta(hours=3)  # 09:00: the 9 AM slot is now closed
     status, again, _ = place(adr, key="retry-key-2", slot_label=EARLY)
     assert status == 201 and again["id"] == first["id"]
 
@@ -216,7 +225,9 @@ def test_replay_works_even_after_slot_closes(env):
 def test_same_key_different_body_is_conflict(env):
     adr = make_address()
     place(adr, key="retry-key-3")
-    status, out, _ = place(adr, key="retry-key-3", slot_label=EARLY)
+    status, out, _ = place(adr, key="retry-key-3", payment_method="online", items=[{"product_id": "prd_vada_pav", "quantity": 5}])
+    assert status in (400, 409)  # different dishes (or UPI off) with the same key
+    status, out, _ = place(adr, key="retry-key-3", items=[{"product_id": "prd_vada_pav", "quantity": 5}])
     assert status == 409 and error_code(out) == "IDEMPOTENCY_CONFLICT"
 
 
@@ -231,7 +242,7 @@ def test_key_is_per_user(env):
 def test_expired_key_can_be_reused(env):
     adr = make_address()
     _, first, _ = place(adr, key="retry-key-4", delivery_date=TOMORROW)
-    env["clock"]["now"] = SIX_AM + timedelta(hours=25)  # 07:00 on the 14th; record expired
+    env["clock"]["now"] = TEN_AM + timedelta(hours=25)  # 07:00 on the 14th; record expired
     status, second, _ = place(adr, key="retry-key-4", delivery_date="2026-11-15", slot_label=MORNING)
     assert status == 201 and second["id"] != first["id"]
 
@@ -325,10 +336,6 @@ def test_bad_items(env, items):
 
 
 @pytest.mark.parametrize("over", [
-    {"delivery_date": "13-11-2026"},
-    {"delivery_date": "2026-02-30"},
-    {"slot_label": "Dinner 8:00 - 9:00 PM"},
-    {"slot_label": ["Morning"]},
     {"payment_method": "card"},
     {"address_id": ""},
     {"total": 1},
@@ -339,22 +346,91 @@ def test_bad_request_fields(env, over):
     assert status == 400 and error_code(out) == "VALIDATION_ERROR", out
 
 
-def test_slot_cutoff_30_minutes(env):
+@pytest.mark.parametrize("sent", [
+    {"delivery_date": "2026-11-15", "slot_label": "Evening 8:00 - 9:00 PM"},
+    {"delivery_date": "13-11-2026", "slot_label": ["x"]},
+    {"delivery_date": None, "slot_label": None},
+])
+def test_client_dates_and_slots_are_ignored(env, sent):
+    """Part 7d: an order is always for today, now, whatever the app sends."""
     adr = make_address()
-    env["clock"]["now"] = datetime(2026, 11, 13, 9, 29, tzinfo=IST)
-    assert place(adr, key="slot-key-1")[0] == 201  # the 10:00 slot closes at 9:30
-    env["clock"]["now"] = datetime(2026, 11, 13, 9, 30, tzinfo=IST)
-    status, out, _ = place(adr, key="slot-key-2")
-    assert status == 409 and error_code(out) == "SLOT_UNAVAILABLE"
-    # The same slot tomorrow is fine
-    assert place(adr, key="slot-key-3", delivery_date=TOMORROW)[0] == 201
+    status, o, _ = place(adr, **sent)
+    assert status == 201, o
+    assert o["delivery_date"] == TODAY and "slot_label" not in o
+    assert o["estimated_delivery_at"] == "2026-11-13T05:05:00.000Z"
 
 
-@pytest.mark.parametrize("day", ["2026-11-12", "2026-11-15"])
-def test_only_today_or_tomorrow(env, day):
+@pytest.mark.parametrize("hh, mm, ok", [(8, 59, False), (9, 0, True), (20, 30, True), (20, 31, False), (23, 0, False)])
+def test_ordering_hours(env, hh, mm, ok):
     adr = make_address()
-    status, out, _ = place(adr, delivery_date=day)
-    assert status == 409 and error_code(out) == "SLOT_UNAVAILABLE"
+    env["clock"]["now"] = datetime(2026, 11, 13, hh, mm, tzinfo=IST)
+    status, out, _ = place(adr, key=f"hours-{hh:02d}{mm:02d}")
+    if ok:
+        assert status == 201, out
+    else:
+        assert status == 409 and error_code(out) == "KITCHEN_CLOSED"
+
+
+def test_estimate_grows_with_the_kitchen_queue(env):
+    adr = make_address()
+    stamps = []
+    for n in range(4):
+        _, o, _ = place(adr, key=f"queue-key-{n}")
+        stamps.append((o["prep_minutes"], o["estimated_delivery_at"]))
+    assert [p for p, _ in stamps] == [20, 22, 24, 26]  # +2 min per order already waiting
+    assert stamps[3][1] == "2026-11-13T05:10:00.000Z"  # 10:00 + 26 + 12 = 10:38 -> 10:40
+
+
+def test_queue_extra_is_capped_and_ignores_unpaid_and_finished(env):
+    adr = make_address()
+    for n in range(20):
+        place(adr, key=f"cap-key-{n:02d}")
+    _, o, _ = place(adr, key="cap-key-last")
+    assert o["prep_minutes"] == 20 + 30  # at most +30
+    # cancelled orders don't count
+    t = env["table"]
+    for item in t.query(IndexName="GSI1", KeyConditionExpression=Key("GSI1PK").eq(f"ORDERDATE#{TODAY}"))["Items"]:
+        t.update_item(Key={"PK": item["PK"], "SK": item["SK"]}, UpdateExpression="SET #s = :c",
+                      ExpressionAttributeNames={"#s": "status"}, ExpressionAttributeValues={":c": "CANCELLED"})
+    assert place(adr, key="cap-key-after")[1]["prep_minutes"] == 20
+
+
+def test_travel_time_follows_distance(env):
+    next_door = make_address(lat=19.8570, lon=75.8521)  # a few metres from the hotel
+    _, o, _ = place(next_door, key="near-key-1")
+    assert o["travel_minutes"] == math.ceil(5 + 4 * o["address_snapshot"]["distance_km"]) == 6
+    assert eta.travel_minutes(3.0) == 17 and eta.travel_minutes(None) == 13
+
+
+def test_round_up_to_five_minutes():
+    at = datetime(2026, 11, 13, 13, 31, 10, tzinfo=IST)
+    assert eta.round_up(at).astimezone(IST).strftime("%H:%M") == "13:35"
+    assert eta.round_up(datetime(2026, 11, 13, 13, 35, tzinfo=IST)).astimezone(IST).strftime("%H:%M") == "13:35"
+
+
+def test_estimate_route(env):
+    adr = make_address()
+    status, est, resp = invoke(orders, ev("GET /orders/estimate", key=None) | {"queryStringParameters": {"address_id": adr}})
+    assert status == 200 and resp["headers"]["Cache-Control"] == "no-store"
+    assert est == {
+        "prep_minutes": 20, "travel_minutes": 12, "total_minutes": 35,
+        "estimated_delivery_at": "2026-11-13T05:05:00.000Z", "approximate": False, "can_order": True,
+    }
+    # no address given: the default address is used
+    status, est, _ = invoke(orders, ev("GET /orders/estimate", key=None))
+    assert status == 200 and est["travel_minutes"] == 12 and est["approximate"] is False
+    # a user with no address: a typical 2 km
+    status, est, _ = invoke(orders, ev("GET /orders/estimate", BOB, key=None))
+    assert status == 200 and est["travel_minutes"] == 13 and est["approximate"] is True
+    # someone else's address id: 404
+    event = ev("GET /orders/estimate", BOB, key=None) | {"queryStringParameters": {"address_id": adr}}
+    assert invoke(orders, event)[0] == 404
+
+
+def test_estimate_says_when_closed(env):
+    env["clock"]["now"] = datetime(2026, 11, 13, 21, 0, tzinfo=IST)
+    status, est, _ = invoke(orders, ev("GET /orders/estimate", key=None))
+    assert status == 200 and est["can_order"] is False and "9:00 AM" in est["closed_reason"]
 
 
 def test_address_must_be_mine(env):
@@ -382,7 +458,7 @@ def test_list_newest_first_and_only_mine(env):
     a = make_address(ALICE)
     b = make_address(BOB)
     _, o1, _ = place(a, key="list-key-1")
-    env["clock"]["now"] = SIX_AM + timedelta(minutes=5)
+    env["clock"]["now"] = TEN_AM + timedelta(minutes=5)
     _, o2, _ = place(a, key="list-key-2")
     place(b, BOB, key="list-key-3")
     status, listed, _ = invoke(orders, ev("GET /orders"))
@@ -425,8 +501,22 @@ def test_cancel_confirmed_order(env):
     assert status == 200 and again["status"] == "CANCELLED"
 
 
-@pytest.mark.parametrize("status_now", ["PREPARING", "ASSIGNED", "OUT_FOR_DELIVERY", "DELIVERED"])
-def test_cannot_cancel_once_assigned(env, status_now):
+@pytest.mark.parametrize("status_now", ["PREPARING", "CONFIRMED", "ASSIGNED"])
+def test_can_cancel_until_out_for_delivery(env, status_now):
+    adr = make_address()
+    _, o, _ = place(adr)
+    env["table"].update_item(
+        Key={"PK": f"USER#{ALICE['sub']}", "SK": f"ORDER#{o['id']}"},
+        UpdateExpression="SET #s = :s", ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":s": status_now},
+    )
+    status, out, _ = invoke(orders, ev("POST /orders/{id}/cancel", order_id=o["id"]))
+    assert status == 200 and out["status"] == "CANCELLED" and out["cancelled_at"]
+    assert "refund_status" not in out  # cash: nothing to refund
+
+
+@pytest.mark.parametrize("status_now", ["OUT_FOR_DELIVERY", "DELIVERED"])
+def test_cannot_cancel_once_out_for_delivery(env, status_now):
     adr = make_address()
     _, o, _ = place(adr)
     env["table"].update_item(

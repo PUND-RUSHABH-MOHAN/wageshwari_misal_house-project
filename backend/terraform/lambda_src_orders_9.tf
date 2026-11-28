@@ -2,6 +2,16 @@
 
 locals {
   lambda_src_orders_9 = <<PYSRC
+        out.update({"can_order": False, "closed_reason": status["message"]})
+    elif not store.within_hours(now.astimezone(IST)):
+        out.update({"can_order": False, "closed_reason": "We take online orders from 9:00 AM to 8:30 PM."})
+    else:
+        out["can_order"] = True
+    return response(200, out, {"Cache-Control": "no-store"})
+
+
+def list_orders(event: dict) -> dict:
+    user_id = jwt_claims(event)["sub"]
     page = users.table().query(
         KeyConditionExpression=Key("PK").eq(f"USER#{user_id}") & Key("SK").begins_with("ORDER#"),
         ScanIndexForward=False,  # ids start with a timestamp, so this is newest first
@@ -17,57 +27,47 @@ def get_order(event: dict) -> dict:
 
 
 def cancel_order(event: dict) -> dict:
+    """POST /orders/{id}/cancel: allowed until the order is out for delivery (part 7d).
+
+    Conditional on the status read here, so a "Picked up" that lands first wins and this answers 409.
+    Paid UPI orders (or ones with a UTR) get refund_status "pending" for the hotel to refund by hand.
+    """
     user_id = jwt_claims(event)["sub"]
     order_id = (event.get("pathParameters") or {}).get("id", "")
     current = _get_order_item(user_id, order_id)
     if current["status"] == "CANCELLED":
         return response(200, to_order(current))  # cancelling twice is harmless
+    if current["status"] not in CANCELLABLE:
+        raise ApiError(409, "ORDER_NOT_CANCELLABLE", _not_cancellable_message(current["status"]))
     now = _iso(_now_utc())
+    sets = [
+        "#s = :cancelled", "cancelled_at = :now", "updated_at = :now", "cancelled_by = :by",
+        "status_history = list_append(if_not_exists(status_history, :empty), :entry)",
+    ]
+    values = {
+        ":cancelled": "CANCELLED",
+        ":now": now,
+        ":current": current["status"],
+        ":by": "customer",
+        ":empty": [],
+        ":entry": [history_entry("CANCELLED", now, "customer")],
+    }
+    if needs_refund(current):
+        sets.append("refund_status = :refund")
+        values[":refund"] = "pending"
     try:
         updated = users.table().update_item(
             Key=_key(user_id, f"ORDER#{current['id']}"),
-            UpdateExpression=(
-                "SET #s = :cancelled, cancelled_at = :now, updated_at = :now, cancelled_by = :by, "
-                "status_history = list_append(if_not_exists(status_history, :empty), :entry)"
-            ),
-            # Not once a delivery boy has it, and not after a UPI payment was reported (needs a refund).
-            ConditionExpression="#s IN (:s0, :s1, :s2) AND attribute_not_exists(utr)",
+            UpdateExpression="SET " + ", ".join(sets),
+            ConditionExpression="#s = :current",  # nobody moved it on (e.g. Picked up) since we read it
             ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":cancelled": "CANCELLED",
-                ":now": now,
-                ":s0": CANCELLABLE[0],
-                ":s1": CANCELLABLE[1],
-                ":s2": CANCELLABLE[2],
-                ":by": "customer",
-                ":empty": [],
-                ":entry": [history_entry("CANCELLED", now, "customer")],
-            },
+            ExpressionAttributeValues=values,
             ReturnValues="ALL_NEW",
         )["Attributes"]
     except ClientError as err:
         if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
-        if current.get("utr") and current["status"] in CANCELLABLE:
-            raise ApiError(
-                409,
-                "ORDER_NOT_CANCELLABLE",
-                "You've already paid for this order by UPI. Please call the hotel to cancel and get a refund.",
-            ) from err
-        raise ApiError(
-            409,
-            "ORDER_NOT_CANCELLABLE",
-            "A delivery boy already has this order, so it can't be cancelled here. Please call the hotel.",
-        ) from err
-    return response(200, to_order(updated))
-
-
-def submit_payment(event: dict) -> dict:
-    """POST /orders/{id}/payment {utr}: the customer says "I've paid by UPI" and gives the reference.
-
-    Allowed while the order waits for payment, also to correct a mistyped UTR before the kitchen
-    has confirmed it. A UTR can belong to one order only (409 UTR_ALREADY_USED).
-    """
-    user_id = jwt_claims(event)["sub"]
+        fresh = _get_order_item(user_id, current["id"])
+        if fresh["status"] == "CANCELLED":
 PYSRC
 }

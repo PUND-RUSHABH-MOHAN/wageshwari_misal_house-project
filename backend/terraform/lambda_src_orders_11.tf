@@ -2,6 +2,36 @@
 
 locals {
   lambda_src_orders_11 = <<PYSRC
+            "Update": {
+                "TableName": table.name,
+                "Key": _key(user_id, f"ORDER#{current['id']}"),
+                "UpdateExpression": (
+                    "SET utr = :utr, payment_status = :submitted, payment_submitted_at = :now, updated_at = :now"
+                ),
+                "ConditionExpression": "#s = :pending AND payment_status <> :paid",
+                "ExpressionAttributeNames": {"#s": "status"},
+                "ExpressionAttributeValues": {
+                    ":utr": utr, ":submitted": "submitted", ":now": now, ":pending": "PENDING_PAYMENT", ":paid": "paid",
+                },
+            }
+        },
+    ]
+    if current.get("utr"):  # a correction: free the old, mistyped UTR
+        steps.append({
+            "Delete": {
+                "TableName": table.name,
+                "Key": {"PK": f"UTR#{current['utr']}", "SK": "UTR"},
+                "ConditionExpression": "order_id = :me",
+                "ExpressionAttributeValues": {":me": current["id"]},
+            }
+        })
+    try:
+        table.meta.client.transact_write_items(TransactItems=steps)
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "TransactionCanceledException":
+            raise
+        reasons = [r.get("Code") for r in err.response.get("CancellationReasons", [])]
+        if reasons and reasons[0] == "ConditionalCheckFailed":
             raise ApiError(409, "UTR_ALREADY_USED", "This UTR was already used for another order.") from err
         raise ApiError(409, "ORDER_NOT_PAYABLE", "This order changed meanwhile. Pull down to refresh.") from err
     return response(200, to_order(_get_order_item(user_id, current["id"])))
@@ -9,6 +39,7 @@ locals {
 
 ROUTES = {
     "POST /orders": create_order,
+    "GET /orders/estimate": get_estimate,
     "GET /orders": list_orders,
     "GET /orders/{id}": get_order,
     "POST /orders/{id}/cancel": cancel_order,

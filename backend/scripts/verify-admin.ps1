@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
   Checks the deployed admin API (Part 6) with an account in the Cognito `admin` group.
-  It places ONE real cash order for tomorrow from that account, confirms it (part 7c: if a
-  delivery boy is on duty it is assigned to him for a moment), and then cancels it from the
-  kitchen with the reason "Verify script test". The menu is only read
+  It places ONE real cash order (today, now) from that account, confirms it (part 7c: if a
+  delivery boy is on duty it is assigned to him for a moment), pushes its estimate 15 minutes
+  later (part 7d), and then cancels it from the kitchen with the reason "Verify script test".
+  Orders are only taken 9:00 AM - 8:30 PM India time; outside those hours that part is skipped. The menu is only read
   (one no-change write), so customers see nothing different.
   Pass -CustomerEmail (a normal, non-admin account) to also check that customers get 403.
   Works in Windows PowerShell 5.1 and PowerShell 7.
@@ -69,7 +70,8 @@ function Login([string] $Who) {
 
 $istNow = [DateTime]::UtcNow.AddHours(5.5)
 $today = $istNow.ToString("yyyy-MM-dd")
-$tomorrow = $istNow.AddDays(1).ToString("yyyy-MM-dd")
+$minutesNow = $istNow.Hour * 60 + $istNow.Minute
+$orderingOpen = ($minutesNow -ge 9 * 60) -and ($minutesNow -le 20 * 60 + 30)  # store.py: 9:00 - 20:30 IST
 
 $admin = Login $Email
 if ($admin.user.role -ne "admin") {
@@ -107,7 +109,17 @@ try {
   }
   Check "unknown dish is 404" (Invoke-Api PATCH "/admin/products/prd_does_not_exist" @{ price = 100 } -Token $t) 404 "NOT_FOUND"
 
-  Write-Host "`n--- One real order through the kitchen (tomorrow, then cancelled) ---"
+  Write-Host "`n--- Cooking time (part 7d, one no-change write) ---"
+  $storeNow = Invoke-Api GET "/store"
+  Check "GET /store has cooking time + last order" $storeNow 200 -Extra "prep=$($storeNow.Body.prep_minutes) min, last order $($storeNow.Body.last_order_at)"
+  if ($storeNow.Body.prep_minutes) {
+    $same = Invoke-Api PATCH "/admin/store" @{ prep_minutes = [int] $storeNow.Body.prep_minutes } -Token $t
+    Check "PATCH /admin/store same cooking time" $same 200 -Extra "$($same.Body.prep_minutes) min"
+    Assert "  ...online orders switch unchanged" ($same.Body.accepting_orders -eq $storeNow.Body.accepting_orders)
+  }
+  Check "cooking time 2 min is refused" (Invoke-Api PATCH "/admin/store" @{ prep_minutes = 2 } -Token $t) 400 "VALIDATION_ERROR"
+
+  Write-Host "`n--- One real order through the kitchen (today, then cancelled) ---"
   $list = Invoke-Api GET "/addresses" -Token $t
   if (@($list.Body).Count -lt 5) {
     $r = Invoke-Api POST "/addresses" @{
@@ -124,24 +136,39 @@ try {
   $item = $menu | Sort-Object price | Select-Object -Last 1
   $qty = [int] [Math]::Max(1, [Math]::Ceiling(10000 / $item.price))
   $body = @{
-    address_id = $addressId; delivery_date = $tomorrow; slot_label = "Afternoon 12:00 - 1:00 PM"; payment_method = "cod"
+    address_id = $addressId; payment_method = "cod"
     items = @(@{ product_id = $item.id; quantity = $qty })
   }
-  $o = Invoke-Api POST "/orders" $body -Token $t -Key ("verify-" + [Guid]::NewGuid().ToString("N"))
-  Check "place an order (as a customer would)" $o 201 -Extra $o.Body.order_number
+  if (-not $orderingOpen) {
+    Check "order now is refused (kitchen closed)" (Invoke-Api POST "/orders" $body -Token $t -Key ("verify-" + [Guid]::NewGuid().ToString("N"))) 409 "KITCHEN_CLOSED"
+    Write-Host "SKIP  the kitchen flow: run again between 9:00 AM and 8:30 PM IST." -ForegroundColor Yellow
+    $o = [pscustomobject] @{ Status = 0; Body = $null }
+  } else {
+    $o = Invoke-Api POST "/orders" $body -Token $t -Key ("verify-" + [Guid]::NewGuid().ToString("N"))
+    Check "place an order (as a customer would)" $o 201 -Extra $o.Body.order_number
+  }
   if ($o.Status -eq 201) {
     $id = $o.Body.id
-    $next = Invoke-Api GET "/admin/orders?date=$tomorrow" -Token $t
-    Assert "it's on tomorrow's board" (@($next.Body | Where-Object { $_.id -eq $id }).Count -eq 1)
+    $next = Invoke-Api GET "/admin/orders?date=$today" -Token $t
+    Assert "it's on today's board" (@($next.Body | Where-Object { $_.id -eq $id }).Count -eq 1)
     Check "skipping a step is refused" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "DELIVERED" } -Token $t) 409 "INVALID_STATUS_CHANGE"
     Assert "new cash order waits as PENDING" ($o.Body.status -eq "PENDING") $o.Body.status
     $p = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CONFIRMED" } -Token $t
     Check "kitchen: Confirm order" $p 200 -Extra "$($p.Body.status) (auto-assign: $($p.Body.auto_assign))"
     $again = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CONFIRMED" } -Token $t
     Assert "confirming twice changes nothing" (($again.Status -eq 200) -and ($again.Body.auto_assign -eq "unchanged")) $again.Body.auto_assign
-    if ($p.Body.status -eq "ASSIGNED") {
-      Check "customer can't cancel once assigned" (Invoke-Api POST "/orders/$id/cancel" -Token $t) 409 "ORDER_NOT_CANCELLABLE"
-    }
+    $before = [DateTime]::Parse($o.Body.estimated_delivery_at).ToUniversalTime()
+    $afterConfirm = [DateTime]::Parse($p.Body.estimated_delivery_at).ToUniversalTime()
+    Assert "confirm never makes the estimate earlier" ($afterConfirm -ge $before) $afterConfirm.AddHours(5.5).ToString("HH:mm")
+
+    Write-Host "`n--- Delay (part 7d) ---"
+    Check "delay of 2 min is refused" (Invoke-Api PATCH "/admin/orders/$id/eta" @{ delay_minutes = 2 } -Token $t) 400 "VALIDATION_ERROR"
+    $d = Invoke-Api PATCH "/admin/orders/$id/eta" @{ delay_minutes = 15; reason = "Verify script test" } -Token $t
+    Check "PATCH /admin/orders/{id}/eta +15 min" $d 200 -Extra ([DateTime]::Parse($d.Body.estimated_delivery_at).ToUniversalTime().AddHours(5.5).ToString("HH:mm") + " IST")
+    Assert "  ...at least 15 min later" ([DateTime]::Parse($d.Body.estimated_delivery_at).ToUniversalTime() -ge $afterConfirm.AddMinutes(15))
+    $seen = Invoke-Api GET "/orders/$id" -Token $t
+    Assert "customer sees 'delayed' with the reason" (($seen.Body.delayed -eq $true) -and ($seen.Body.delay_reason -eq "Verify script test")) "delay_minutes=$($seen.Body.delay_minutes)"
+    Check "no refund to record on a live order" (Invoke-Api POST "/admin/orders/$id/refund" @{ status = "refunded" } -Token $t) 409 "NO_REFUND_PENDING"
     Check "kitchen cancel needs a reason" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "CANCELLED" } -Token $t) 400 "VALIDATION_ERROR"
     $c = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CANCELLED"; reason = "Verify script test" } -Token $t
     Check "kitchen cancel with reason" $c 200 -Extra $c.Body.status
@@ -149,6 +176,9 @@ try {
     Assert "customer sees the reason" ($mine.Body.cancel_reason -eq "Verify script test") $mine.Body.cancel_reason
     $steps = ($c.Body.status_history | ForEach-Object { $_.status }) -join " > "
     Assert "history starts PENDING > CONFIRMED, ends CANCELLED" ($steps -like "PENDING > CONFIRMED*CANCELLED") $steps
+    Assert "cancel time is recorded; cash order needs no refund" (([bool] $c.Body.cancelled_at) -and (-not $c.Body.refund_status))
+    Check "no delay once cancelled" (Invoke-Api PATCH "/admin/orders/$id/eta" @{ delay_minutes = 10 } -Token $t) 409 "INVALID_STATUS_CHANGE"
+    Check "cash order: refund route refuses" (Invoke-Api POST "/admin/orders/$id/refund" @{ status = "refunded" } -Token $t) 409 "NO_REFUND_PENDING"
   }
 } finally {
   if ($tempAddress) {

@@ -6,6 +6,7 @@ import { Button, Tag } from '@/components/ui';
 import { Colors, Radius, Shadow, Spacing } from '@/constants/theme';
 import { isCancellable } from '@/context/AppContext';
 import type { Order, OrderStatus } from '@/types';
+import { delayNotice, deliveryTimeLine, etaWithCountdown, hasLiveEstimate, REFUND_LABELS, refundNotice } from '@/utils/eta';
 import {
   formatAddress,
   formatCurrency,
@@ -79,6 +80,35 @@ export function DeliveryBoyRow({ order }: { order: Order }) {
   );
 }
 
+/**
+ * Part 7d: "Estimated delivery 1:35 PM · about 25 min", plus a "running late" notice once the kitchen
+ * has pushed it 10+ minutes past the first promise. Always labelled as an estimate.
+ */
+export function EtaBanner({ order }: { order: Order }) {
+  if (!hasLiveEstimate(order)) return null;
+  const late = delayNotice(order);
+  return (
+    <View style={styles.etaWrap}>
+      <View style={[styles.notice, styles.etaBox]}>
+        <Icon name="clock" size={16} color={Colors.primaryDark} />
+        <View style={styles.flex}>
+          <Text style={[styles.noticeText, { color: Colors.primaryDark }]}>
+            {order.status === 'OUT_FOR_DELIVERY' ? 'Arriving ' : 'Estimated delivery '}
+            {etaWithCountdown(order.estimated_delivery_at!)}
+          </Text>
+          <Text style={styles.etaHint}>Estimate, not a guarantee</Text>
+        </View>
+      </View>
+      {late ? (
+        <View style={[styles.notice, { backgroundColor: Colors.warningSoft }]}>
+          <Icon name="info" size={16} color={Colors.warning} />
+          <Text style={[styles.noticeText, { color: Colors.warning }]}>{late}</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 export function OrderTimeline({ order }: { order: Order }) {
   const { status } = order;
   if (status === 'CANCELLED') {
@@ -87,11 +117,35 @@ export function OrderTimeline({ order }: { order: Order }) {
         ? `The kitchen cancelled this order: ${order.cancel_reason}`
         : order.cancelled_by === 'system' && order.cancel_reason
           ? `Cancelled: ${order.cancel_reason}`
-          : 'This order was cancelled.';
+          : order.cancelled_by === 'customer'
+            ? 'You cancelled this order.'
+            : 'This order was cancelled.';
+    const refund = refundNotice(order);
     return (
-      <View style={[styles.notice, { backgroundColor: Colors.dangerSoft }]}>
-        <Icon name="close" size={16} color={Colors.danger} />
-        <Text style={[styles.noticeText, { color: Colors.danger }]}>{text}</Text>
+      <View style={styles.etaWrap}>
+        <View style={[styles.notice, { backgroundColor: Colors.dangerSoft }]}>
+          <Icon name="close" size={16} color={Colors.danger} />
+          <Text style={[styles.noticeText, { color: Colors.danger }]}>
+            {text}
+            {order.cancelled_at ? ` (${formatDateTime(order.cancelled_at)})` : ''}
+          </Text>
+        </View>
+        {refund ? (
+          <View
+            style={[
+              styles.notice,
+              { backgroundColor: order.refund_status === 'refunded' ? Colors.successSoft : Colors.infoSoft },
+            ]}>
+            <Icon name="upi" size={16} color={order.refund_status === 'refunded' ? Colors.success : Colors.info} />
+            <Text
+              style={[
+                styles.noticeText,
+                { color: order.refund_status === 'refunded' ? Colors.success : Colors.info },
+              ]}>
+              {refund}
+            </Text>
+          </View>
+        ) : null}
       </View>
     );
   }
@@ -170,6 +224,7 @@ export function OrderCard({
   const itemCount = order.items.reduce((n, i) => n + i.quantity, 0);
   const summary = order.items.map((i) => `${i.quantity} × ${i.product_name}`).join(', ');
   const a = order.address_snapshot;
+  const timeLine = deliveryTimeLine(order);
 
   return (
     <View style={styles.card}>
@@ -188,6 +243,22 @@ export function OrderCard({
         <Text style={styles.summary} numberOfLines={expanded ? undefined : 2}>
           {summary}
         </Text>
+        {!expanded && timeLine ? (
+          <View style={styles.timeRow}>
+            <Icon name="clock" size={14} color={order.delayed ? Colors.warning : Colors.textMuted} />
+            <Text style={[styles.timeText, order.delayed && styles.timeLate]} numberOfLines={1}>
+              {timeLine}
+              {order.delayed ? ' · delayed' : ''}
+            </Text>
+          </View>
+        ) : null}
+        {!expanded && order.refund_status ? (
+          <Tag
+            label={REFUND_LABELS[order.refund_status]}
+            color={order.refund_status === 'pending' ? Colors.info : Colors.success}
+            bg={order.refund_status === 'pending' ? Colors.infoSoft : Colors.successSoft}
+          />
+        ) : null}
         <View style={styles.footRow}>
           <Text style={styles.meta}>
             {itemCount} item{itemCount > 1 ? 's' : ''} · {order.payment_method === 'cod' ? 'COD' : 'UPI'}
@@ -216,6 +287,7 @@ export function OrderCard({
           <View style={styles.divider} />
 
           <Text style={styles.blockTitle}>Order status</Text>
+          <EtaBanner order={order} />
           <OrderTimeline order={order} />
 
           <View style={styles.divider} />
@@ -223,7 +295,8 @@ export function OrderCard({
           <View style={styles.infoRow}>
             <Icon name="clock" size={16} color={Colors.primary} />
             <Text style={styles.infoText}>
-              {formatDeliveryDate(order.delivery_date)} · {order.slot_label}
+              {formatDeliveryDate(order.delivery_date)}
+              {timeLine ? ` · ${timeLine}` : ''}
             </Text>
           </View>
           <View style={styles.infoRow}>
@@ -370,6 +443,12 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
   },
   noticeText: { fontSize: 13, fontWeight: '700', flexShrink: 1 },
+  etaWrap: { gap: Spacing.sm, marginBottom: Spacing.md },
+  etaBox: { backgroundColor: Colors.primarySoft },
+  etaHint: { fontSize: 11, color: Colors.primaryDark, opacity: 0.8, marginTop: 1 },
+  timeRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: Spacing.sm },
+  timeText: { fontSize: 12, color: Colors.textMuted, fontWeight: '600', flexShrink: 1 },
+  timeLate: { color: Colors.warning, fontWeight: '800' },
 
   step: { flexDirection: 'row', gap: Spacing.md },
   stepRail: { alignItems: 'center', width: 26 },

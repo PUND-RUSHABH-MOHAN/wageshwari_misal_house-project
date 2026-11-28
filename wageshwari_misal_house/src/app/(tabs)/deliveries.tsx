@@ -7,9 +7,11 @@
  *   Re-checks every 20 s while open, so newly assigned orders appear by themselves.
  * - "Picked up" -> "Delivered" (POST /delivery/orders/:id/status).
  * The server sends the customer's phone and address only while the delivery is active.
+ * Part 7d: each order shows when the customer expects it (soonest first). If an order of mine is
+ * cancelled (customer or kitchen) the next refresh pops up "don't deliver it".
  */
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -35,12 +37,28 @@ import { withAuth } from '@/services/session';
 import type { DeliveryBoy, DeliveryOrder } from '@/types';
 import { formatCurrency, formatDeliveryDate, formatPhone, SPICE_LABELS } from '@/utils/format';
 import { callPhone, openMapAt } from '@/utils/maps';
-import { istClockTime, istDate } from '@/utils/pricing';
+import { istClockTime, istDate, minutesUntil } from '@/utils/pricing';
 
 const POLL_MS = 20000;
 const ACCOUNT_HREF = '/profile' as const;
 
 const isActive = (o: DeliveryOrder) => o.status === 'ASSIGNED' || o.status === 'OUT_FOR_DELIVERY';
+
+const cancelledText = (o: DeliveryOrder) =>
+  o.cancelled_by === 'customer'
+    ? "Cancelled by the customer · don't deliver"
+    : o.cancelled_by === 'kitchen'
+      ? `Cancelled by the hotel · don't deliver${o.cancel_reason ? ` (${o.cancel_reason})` : ''}`
+      : `Cancelled · don't deliver${o.cancel_reason ? ` (${o.cancel_reason})` : ''}`;
+
+/** "Deliver by 1:35 PM · 12 min left" (part 7d), or the old slot for orders from before 7d. */
+function dueText(o: DeliveryOrder): string {
+  if (o.estimated_delivery_at && isActive(o)) {
+    const left = minutesUntil(o.estimated_delivery_at);
+    return `Deliver by ${istClockTime(o.estimated_delivery_at)} · ${left > 0 ? `${left} min left` : 'late'}`;
+  }
+  return o.slot_label;
+}
 
 export default function DeliveriesScreen() {
   const { isDeliveryBoy } = useApp();
@@ -51,6 +69,8 @@ export default function DeliveriesScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  /** Orders I had on the way at the last refresh; null before the first load. */
+  const activeIds = useRef<Set<string> | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -58,6 +78,16 @@ export default function DeliveriesScreen() {
         withAuth((t) => deliveryApi.me(t)),
         withAuth((t) => deliveryApi.orders(t)),
       ]);
+      // Part 7d: tell the delivery boy straight away when one of his orders was cancelled.
+      const before = activeIds.current;
+      const gone = before ? list.filter((o) => o.status === 'CANCELLED' && before.has(o.id)) : [];
+      activeIds.current = new Set(list.filter(isActive).map((o) => o.id));
+      if (gone.length > 0) {
+        Alert.alert(
+          gone.length === 1 ? 'Order cancelled' : `${gone.length} orders cancelled`,
+          `${gone.map((o) => `${o.order_number}: ${cancelledText(o)}`).join('\n')}\n\nPlease bring the food back to the hotel.`,
+        );
+      }
       setMe(boy);
       setOrders(list);
       setStatus('ready');
@@ -149,7 +179,8 @@ export default function DeliveriesScreen() {
     );
   }
 
-  const active = orders.filter(isActive);
+  const due = (o: DeliveryOrder) => o.estimated_delivery_at ?? o.assigned_at ?? '';
+  const active = orders.filter(isActive).sort((a, b) => due(a).localeCompare(due(b))); // soonest first
   const finished = orders.filter((o) => !isActive(o));
   const onDuty = me?.on_duty ?? false;
 
@@ -217,8 +248,8 @@ export default function DeliveriesScreen() {
                       <Text style={styles.muted}>
                         {o.area}
                         {o.delivered_at ? ` · ${istClockTime(o.delivered_at)}` : ''}
-                        {o.cancel_reason ? ` · ${o.cancel_reason}` : ''}
                       </Text>
+                      {o.status === 'CANCELLED' ? <Text style={styles.cancelled}>{cancelledText(o)}</Text> : null}
                     </View>
                     <StatusBadge status={o.status} />
                   </View>
@@ -242,12 +273,16 @@ function DeliveryCard({ order, busy, onNext }: { order: DeliveryOrder; busy: boo
       <View style={styles.headRow}>
         <View style={styles.flex}>
           <Text style={styles.orderNo}>{order.order_number}</Text>
-          <Text style={styles.muted}>
-            {today ? 'Today' : formatDeliveryDate(order.delivery_date)} · {order.slot_label}
-          </Text>
+          <Text style={styles.muted}>{today ? 'Today' : formatDeliveryDate(order.delivery_date)}</Text>
         </View>
         <StatusBadge status={order.status} />
       </View>
+      {dueText(order) ? (
+        <View style={styles.due}>
+          <Icon name="clock" size={16} color={Colors.primaryDark} />
+          <Text style={styles.dueText}>{dueText(order)}</Text>
+        </View>
+      ) : null}
 
       {c ? (
         <View style={styles.customer}>
@@ -323,6 +358,17 @@ function DeliveryCard({ order, busy, onNext }: { order: DeliveryOrder; busy: boo
 }
 
 const styles = StyleSheet.create({
+  due: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.primarySoft,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+  },
+  dueText: { fontSize: 14, fontWeight: '800', color: Colors.primaryDark },
+  cancelled: { fontSize: 12, fontWeight: '800', color: Colors.danger, marginTop: 2 },
   safe: { flex: 1, backgroundColor: Colors.background },
   flex: { flex: 1 },
   header: { paddingHorizontal: Spacing.lg, paddingTop: Spacing.md, paddingBottom: Spacing.sm, gap: Spacing.sm },

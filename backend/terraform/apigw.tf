@@ -22,6 +22,7 @@ locals {
     "PATCH /addresses/{id}"      = { fn = "addresses", auth = true }
     "DELETE /addresses/{id}"     = { fn = "addresses", auth = true }
     "POST /orders"               = { fn = "orders", auth = true }
+    "GET /orders/estimate"       = { fn = "orders", auth = true }
     "GET /orders"                = { fn = "orders", auth = true }
     "GET /orders/{id}"           = { fn = "orders", auth = true }
     "POST /orders/{id}/cancel"   = { fn = "orders", auth = true }
@@ -39,6 +40,8 @@ locals {
     "POST /admin/orders/{id}/assign"  = { fn = "admin", auth = true }
     "GET /admin/delivery-boys"        = { fn = "admin", auth = true }
     "PATCH /admin/delivery-boys/{id}" = { fn = "admin", auth = true }
+    "PATCH /admin/orders/{id}/eta"    = { fn = "admin", auth = true }
+    "POST /admin/orders/{id}/refund"  = { fn = "admin", auth = true }
     # Delivery boys (part 7c): the JWT authorizer checks the login; delivery.py checks the `delivery` group.
     "GET /delivery/me"                  = { fn = "delivery", auth = true }
     "PATCH /delivery/me"                = { fn = "delivery", auth = true }

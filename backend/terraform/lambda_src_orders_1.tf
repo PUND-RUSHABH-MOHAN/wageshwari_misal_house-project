@@ -7,6 +7,7 @@ behind the JWT authorizer; the user id is always the token's `sub`, never the re
 
 Routes
   POST /orders              -> 201 Order   (needs an Idempotency-Key header)
+  GET  /orders/estimate     -> Estimate    ?address_id= (optional): delivery time before ordering (part 7d)
   GET  /orders              -> Order[]     (newest first, latest 50)
   GET  /orders/{id}         -> Order
   POST /orders/{id}/cancel  -> 200 Order
@@ -23,25 +24,22 @@ Rules (the app shows the same ones; the server's answer is final)
     The customer pays in their UPI app and sends the 12-digit UTR; the kitchen checks its UPI app
     and confirms (admin.py). There's no gateway, so nothing confirms payments automatically.
     Unpaid UPI orders without a UTR are cancelled after PAYMENT_WINDOW_MINUTES (expire.py).
-  - Delivery date: today or tomorrow in India time (IST, fixed +05:30). One-hour slots from
-    9:00 AM to 9:00 PM; a slot for today closes 30 minutes before it starts.
+  - When (part 7d): every order is for today, now. There are no dates or slots to choose; old app
+    builds that still send `delivery_date` / `slot_label` have them ignored. Orders are taken
+    9:00 AM - 8:30 PM IST (else 409 KITCHEN_CLOSED). The server works out `estimated_delivery_at`
+    (eta.py) and stores it with `original_estimated_delivery_at`, `prep_minutes`, `travel_minutes`.
   - The hotel can switch online orders off (store.py): new orders get 409 STORE_CLOSED.
   - The address must be the user's and still inside the delivery area.
   - Status flow (part 7c): PENDING / PENDING_PAYMENT -> CONFIRMED -> ASSIGNED (to a delivery boy)
     -> OUT_FOR_DELIVERY -> DELIVERED. Orders from before part 7c may still be PREPARING.
-  - Cancel only while PENDING / PENDING_PAYMENT / CONFIRMED (before a delivery boy is assigned),
-    and not once a UPI payment has been reported (UTR sent): that needs a refund, so the hotel
-    handles it.
+  - Cancel (part 7d): until the order is OUT_FOR_DELIVERY (PENDING, PENDING_PAYMENT, CONFIRMED,
+    PREPARING, ASSIGNED). One conditional write, so it can't cross with the delivery boy's
+    "Picked up": whichever lands first wins. A UPI order the customer already paid (or sent a UTR
+    for) gets `refund_status: "pending"`; the hotel refunds by hand and marks it (admin.py).
   - Once assigned, the customer sees the delivery boy's name and phone (name only once delivered).
   - Idempotency: the same Idempotency-Key with the same body returns the first order instead
     of creating a second one (records expire after 24 h via the table's TTL).
 
 Storage (table wmh-main)
-  PK = "USER#<sub>",  SK = "ORDER#<id>"         the order (ids sort by time)
-  PK = "USER#<sub>",  SK = "IDEMP#<key>"        idempotency record, expires_at = TTL
-  PK = "COUNTER",     SK = "ORDER#<YYYYMMDD>"   daily running number for order_number
-  PK = "ORDERREF#<id>", SK = "ORDER"            which user an order belongs to (admin lookups)
-  PK = "UTR#<utr>",   SK = "UTR"                which order a UPI reference was used for (no reuse)
-  Orders also carry GSI1PK = "ORDERDATE#<delivery_date>" / GSI1SK: index GSI1 lists a day's
 PYSRC
 }

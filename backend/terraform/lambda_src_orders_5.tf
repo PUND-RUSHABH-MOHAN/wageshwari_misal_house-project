@@ -2,44 +2,6 @@
 
 locals {
   lambda_src_orders_5 = <<PYSRC
-            400, "PAYMENT_METHOD_UNAVAILABLE", "UPI payment isn't available right now. Please choose Cash on Delivery."
-        )
-    return {
-        "address_id": address_id,
-        "delivery_date": delivery_date,
-        "slot_label": slot_label,
-        "payment_method": payment,
-        "items": _clean_items(body.get("items")),
-    }
-
-
-def _request_hash(request: dict) -> str:
-    return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# Business rules
-# ---------------------------------------------------------------------------
-def _check_slot(delivery_date: str, slot_label: str, now: datetime) -> tuple[str, int]:
-    now_ist = now.astimezone(IST)
-    today = now_ist.date()
-    day = date.fromisoformat(delivery_date)
-    if day not in (today, today + timedelta(days=1)):
-        raise ApiError(409, "SLOT_UNAVAILABLE", "Delivery can be booked for today or tomorrow only.")
-    slot_id, start_hour = SLOTS_BY_LABEL[slot_label]
-    if day == today and now_ist.hour * 60 + now_ist.minute >= start_hour * 60 - SLOT_CUTOFF_MINUTES:
-        raise ApiError(
-            409, "SLOT_UNAVAILABLE", "That delivery slot has closed for today. Please pick a later slot or tomorrow."
-        )
-    return slot_id, start_hour
-
-
-def _address_snapshot(claims: dict, address_id: str) -> dict:
-    if not _ADDRESS_ID_RE.match(address_id):
-        raise ApiError(404, "NOT_FOUND", "Delivery address not found.")
-    item = users.table().get_item(Key=_key(claims["sub"], f"ADDRESS#{address_id}")).get("Item")
-    if item is None:
-        raise ApiError(404, "NOT_FOUND", "Delivery address not found.")
     addresses._check_in_range(item["latitude"], item["longitude"])  # 422 OUT_OF_DELIVERY_AREA
     return addresses.to_address(item, addresses._default_id(claims))
 
@@ -66,5 +28,43 @@ def _price_lines(order_id: str, lines: list[dict]) -> list[dict]:
         if not product.get("is_active", True):
             raise ApiError(409, "PRODUCT_UNAVAILABLE", f"{name} is no longer on the menu. Please remove it.")
         if not product.get("is_available", True):
+            raise ApiError(409, "PRODUCT_UNAVAILABLE", f"{name} is sold out right now. Please remove it to continue.")
+        if "spice_level" in line and not product.get("has_spice_level", False):
+            raise ApiError(400, "VALIDATION_ERROR", f"{name} doesn't come in spice levels.")
+        unit_price = int(product["price"])
+        priced.append(
+            {
+                "id": f"oit_{n}",
+                "order_id": order_id,
+                "product_id": line["product_id"],
+                "product_name": name,
+                "unit_price": unit_price,
+                "quantity": line["quantity"],
+                **({"spice_level": line["spice_level"]} if "spice_level" in line else {}),
+                **({"note": line["note"]} if "note" in line else {}),
+                "line_total": unit_price * line["quantity"],
+            }
+        )
+    return priced
+
+
+def _next_order_number(now: datetime) -> str:
+    day = now.astimezone(IST).strftime("%Y%m%d")
+    seq = users.table().update_item(
+        Key={"PK": "COUNTER", "SK": f"ORDER#{day}"},
+        UpdateExpression="ADD seq :one",
+        ExpressionAttributeValues={":one": 1},
+        ReturnValues="UPDATED_NEW",
+    )["Attributes"]["seq"]
+    return f"WMH-{day}-{int(seq):04d}"
+
+
+# ---------------------------------------------------------------------------
+# Storage helpers
+# ---------------------------------------------------------------------------
+ORDER_FIELDS = (
+    "id", "order_number", "user_id", "address_snapshot", "delivery_date", "slot_label", "status",
+    "subtotal", "delivery_fee", "tax", "total", "payment_method", "payment_status", "created_at", "items",
+    "cancelled_by", "cancel_reason",  # only on cancelled orders (kitchen / system cancels give a reason)
 PYSRC
 }

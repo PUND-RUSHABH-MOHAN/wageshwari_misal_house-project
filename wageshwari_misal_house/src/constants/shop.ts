@@ -10,8 +10,10 @@ export const SHOP = {
   locality: 'Chandanzira',
   city: 'Jalna',
   pincode: '431203',
-  /** Online delivery hours; the slots live in src/utils/pricing.ts (DELIVERY_SLOTS). */
+  /** Delivery hours. */
   hours: '9 AM – 9 PM',
+  /** Part 7d: online orders are taken until 8:30 PM (src/utils/pricing.ts isOrderingOpen). */
+  orderHours: '9:00 AM – 8:30 PM',
   /** 19°51'24.6"N 75°51'07.0"E. Must match `shop_latitude/longitude` in backend/terraform/variables.tf. */
   latitude: 19.856833,
   longitude: 75.851944,

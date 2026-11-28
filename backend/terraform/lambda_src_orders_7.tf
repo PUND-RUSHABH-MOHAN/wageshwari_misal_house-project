@@ -2,37 +2,6 @@
 
 locals {
   lambda_src_orders_7 = <<PYSRC
-    item = users.table().get_item(Key=_key(user_id, f"ORDER#{order_id}")).get("Item")
-    if item is None:
-        raise ApiError(404, "NOT_FOUND", "Order not found.")
-    return item
-
-
-def _live_idempotency_record(user_id: str, key: str, now: datetime) -> dict | None:
-    item = users.table().get_item(Key=_key(user_id, f"IDEMP#{key}"), ConsistentRead=True).get("Item")
-    if item is None or int(item.get("expires_at", 0)) <= int(now.timestamp()):
-        return None  # TTL deletes lazily, so an expired record may still be there
-    return item
-
-
-def _replay(user_id: str, record: dict, request_hash: str) -> dict:
-    if record.get("request_hash") != request_hash:
-        raise ApiError(
-            409, "IDEMPOTENCY_CONFLICT", "This Idempotency-Key was already used for a different order."
-        )
-    order = _get_order_item(user_id, record["order_id"])
-    return response(201, to_order(order), {"Idempotent-Replayed": "true"})
-
-
-def _put_order_and_record(order: dict, record: dict, now: datetime) -> None:
-    """One transaction: the order, its ORDERREF pointer, and the idempotency record."""
-    # The resource's client converts plain Python values itself (no {"S": ...} wrapping).
-    client = users.table().meta.client
-    name = users.table().name
-    client.transact_write_items(
-        TransactItems=[
-            {
-                "Put": {
                     "TableName": name,
                     "Item": order,
                     "ConditionExpression": "attribute_not_exists(PK)",
@@ -78,5 +47,37 @@ def create_order(event: dict) -> dict:
     if record is not None:
         return _replay(user_id, record, request_hash)  # placed before any closing: still answered
 
+    store.ensure_open()  # 409 STORE_CLOSED while the hotel has online orders switched off
+    now_ist = now.astimezone(IST)
+    store.ensure_ordering_hours(now_ist)  # 409 KITCHEN_CLOSED outside 9:00 AM - 8:30 PM
+
+    snapshot = _address_snapshot(claims, request["address_id"])
+
+    order_id = f"ord_{int(now.timestamp() * 1000):013d}{secrets.token_hex(3)}"
+    lines = _price_lines(order_id, request["items"])
+    bill = compute_bill(sum(line["line_total"] for line in lines))
+    minimum = min_order_paise()
+    if bill["subtotal"] < minimum:
+        short = minimum - bill["subtotal"]
+        raise ApiError(
+            422,
+            "BELOW_MINIMUM_ORDER",
+            f"Minimum order is {rupees(minimum)} of food. Add {rupees(short)} more to place this order.",
+        )
+
+    created_at = _iso(now)
+    today = now_ist.date().isoformat()
+    estimate = eta.estimate(now, snapshot.get("distance_km"))
+    upi = request["payment_method"] == "online"
+    status = "PENDING_PAYMENT" if upi else "PENDING"
+    order = _to_ddb(
+        {
+            **_key(user_id, f"ORDER#{order_id}"),
+            "entity": "ORDER",
+            "id": order_id,
+            "order_number": _next_order_number(now),
+            "user_id": user_id,
+            "address_snapshot": snapshot,
+            "delivery_date": today,  # always today (part 7d)
 PYSRC
 }

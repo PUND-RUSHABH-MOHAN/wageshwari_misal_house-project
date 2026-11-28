@@ -2,46 +2,12 @@
 
 locals {
   lambda_src_orders_6 = <<PYSRC
-            raise ApiError(409, "PRODUCT_UNAVAILABLE", f"{name} is sold out right now. Please remove it to continue.")
-        if "spice_level" in line and not product.get("has_spice_level", False):
-            raise ApiError(400, "VALIDATION_ERROR", f"{name} doesn't come in spice levels.")
-        unit_price = int(product["price"])
-        priced.append(
-            {
-                "id": f"oit_{n}",
-                "order_id": order_id,
-                "product_id": line["product_id"],
-                "product_name": name,
-                "unit_price": unit_price,
-                "quantity": line["quantity"],
-                **({"spice_level": line["spice_level"]} if "spice_level" in line else {}),
-                **({"note": line["note"]} if "note" in line else {}),
-                "line_total": unit_price * line["quantity"],
-            }
-        )
-    return priced
-
-
-def _next_order_number(now: datetime) -> str:
-    day = now.astimezone(IST).strftime("%Y%m%d")
-    seq = users.table().update_item(
-        Key={"PK": "COUNTER", "SK": f"ORDER#{day}"},
-        UpdateExpression="ADD seq :one",
-        ExpressionAttributeValues={":one": 1},
-        ReturnValues="UPDATED_NEW",
-    )["Attributes"]["seq"]
-    return f"WMH-{day}-{int(seq):04d}"
-
-
-# ---------------------------------------------------------------------------
-# Storage helpers
-# ---------------------------------------------------------------------------
-ORDER_FIELDS = (
-    "id", "order_number", "user_id", "address_snapshot", "delivery_date", "slot_label", "status",
-    "subtotal", "delivery_fee", "tax", "total", "payment_method", "payment_status", "created_at", "items",
-    "cancelled_by", "cancel_reason",  # only on cancelled orders (kitchen / system cancels give a reason)
     "utr", "payment_expires_at",  # UPI orders: the reference the customer sent; pay-by time
     "delivered_at",
+    "cancelled_at",
+    # part 7d: delivery estimate and refunds
+    "estimated_delivery_at", "original_estimated_delivery_at", "prep_minutes", "travel_minutes", "delay_reason",
+    "refund_status", "refund_reference",
 )
 DELIVERY_ACTIVE = ("ASSIGNED", "OUT_FOR_DELIVERY")
 
@@ -57,6 +23,10 @@ def to_order(item: dict) -> dict:
     pay = upi_payment(item)
     if pay:
         out["upi_payment"] = pay
+    late = eta.delay_minutes(item)
+    if late:
+        out["delay_minutes"] = late
+        out["delayed"] = late >= eta.DELAY_NOTICE_MINUTES and item.get("status") not in ("DELIVERED", "CANCELLED")
     if item.get("delivery_boy_id") and item.get("status") in (*DELIVERY_ACTIVE, "DELIVERED"):
         # Part 7c: who brings the order. The phone only while the delivery is on.
         out["delivery_boy"] = {"name": item.get("delivery_boy_name", "")}
@@ -68,5 +38,36 @@ def to_order(item: dict) -> dict:
 def _get_order_item(user_id: str, order_id: str) -> dict:
     if not _ORDER_ID_RE.match(order_id or ""):
         raise ApiError(404, "NOT_FOUND", "Order not found.")
+    item = users.table().get_item(Key=_key(user_id, f"ORDER#{order_id}")).get("Item")
+    if item is None:
+        raise ApiError(404, "NOT_FOUND", "Order not found.")
+    return item
+
+
+def _live_idempotency_record(user_id: str, key: str, now: datetime) -> dict | None:
+    item = users.table().get_item(Key=_key(user_id, f"IDEMP#{key}"), ConsistentRead=True).get("Item")
+    if item is None or int(item.get("expires_at", 0)) <= int(now.timestamp()):
+        return None  # TTL deletes lazily, so an expired record may still be there
+    return item
+
+
+def _replay(user_id: str, record: dict, request_hash: str) -> dict:
+    if record.get("request_hash") != request_hash:
+        raise ApiError(
+            409, "IDEMPOTENCY_CONFLICT", "This Idempotency-Key was already used for a different order."
+        )
+    order = _get_order_item(user_id, record["order_id"])
+    return response(201, to_order(order), {"Idempotent-Replayed": "true"})
+
+
+def _put_order_and_record(order: dict, record: dict, now: datetime) -> None:
+    """One transaction: the order, its ORDERREF pointer, and the idempotency record."""
+    # The resource's client converts plain Python values itself (no {"S": ...} wrapping).
+    client = users.table().meta.client
+    name = users.table().name
+    client.transact_write_items(
+        TransactItems=[
+            {
+                "Put": {
 PYSRC
 }

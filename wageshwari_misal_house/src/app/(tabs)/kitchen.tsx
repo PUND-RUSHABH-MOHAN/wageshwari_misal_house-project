@@ -1,7 +1,11 @@
 /**
  * Kitchen board (admins only; the tab is hidden for customers and the server answers 403).
- * GET /admin/orders for today or tomorrow, grouped by delivery slot; one tap moves an order
- * to its next step (POST /admin/orders/:id/status). Re-checks every 20 s while open.
+ * GET /admin/orders for today (tomorrow only holds pre-orders from before part 7d), soonest
+ * estimated delivery first; one tap moves an order to its next step
+ * (POST /admin/orders/:id/status). Re-checks every 20 s while open.
+ * Part 7d: "Delay" pushes an order's estimate later (PATCH /admin/orders/:id/eta); cancelled UPI
+ * orders that were paid wait under "Refunds to do" (POST /admin/orders/:id/refund); the cooking
+ * time row sets the base for every new estimate (PATCH /admin/store).
  * Part 7c: "Confirm order" also auto-assigns a delivery boy; if nobody is on duty the admin is
  * told and can assign by hand (AssignSheet -> POST /admin/orders/:id/assign).
  * The "Online orders" switch at the top stops / restarts new orders (PATCH /admin/store).
@@ -25,6 +29,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AssignSheet } from '@/components/AssignSheet';
 import { KitchenCancelSheet } from '@/components/KitchenCancelSheet';
 import { isKitchenDone, KitchenOrderCard } from '@/components/KitchenOrderCard';
+import { DelaySheet, PrepTimeSheet, RefundSheet } from '@/components/KitchenTimeSheets';
 import { StopOrdersSheet } from '@/components/StopOrdersSheet';
 import { Button, EmptyState, Pill } from '@/components/ui';
 import { HOME_HREF } from '@/constants/routes';
@@ -41,7 +46,10 @@ const POLL_MS = 20000;
 type Day = 'today' | 'tomorrow';
 
 export default function KitchenScreen() {
-  const { isAdmin, store, storeOpen, reloadStore, setAcceptingOrders } = useApp();
+  const { isAdmin, store, storeOpen, reloadStore, setAcceptingOrders, setPrepMinutes } = useApp();
+  const [prepOpen, setPrepOpen] = useState(false);
+  const [delayTarget, setDelayTarget] = useState<AdminOrder | null>(null);
+  const [refundTarget, setRefundTarget] = useState<AdminOrder | null>(null);
   const [stopOpen, setStopOpen] = useState(false);
   const [reopening, setReopening] = useState(false);
   const [day, setDay] = useState<Day>('today');
@@ -197,6 +205,37 @@ export default function KitchenScreen() {
     ]);
   };
 
+  const delayBy = async (minutes: number, reason: string) => {
+    if (!delayTarget) return;
+    try {
+      replace(await withAuth((t) => adminApi.delay(t, delayTarget.id, minutes, reason || undefined)));
+      setDelayTarget(null);
+    } catch (e) {
+      load();
+      throw new Error(errorMessage(e));
+    }
+  };
+
+  const saveRefund = async (refund: 'refunded' | 'not_needed', reference: string) => {
+    if (!refundTarget) return;
+    try {
+      replace(await withAuth((t) => adminApi.recordRefund(t, refundTarget.id, refund, reference || undefined)));
+      setRefundTarget(null);
+    } catch (e) {
+      load();
+      throw new Error(errorMessage(e));
+    }
+  };
+
+  const savePrep = async (minutes: number) => {
+    try {
+      await setPrepMinutes(minutes);
+      setPrepOpen(false);
+    } catch (e) {
+      throw new Error(errorMessage(e));
+    }
+  };
+
   const cancelWithReason = async (reason: string) => {
     if (!cancelTarget) return;
     try {
@@ -222,15 +261,12 @@ export default function KitchenScreen() {
     );
   }
 
-  const active = orders.filter((o) => !isKitchenDone(o.status));
-  const done = orders.filter((o) => isKitchenDone(o.status));
-  // Server order is slot, then time placed; keep it and group consecutive orders by slot.
-  const slots: { label: string; orders: AdminOrder[] }[] = [];
-  for (const o of active) {
-    const last = slots[slots.length - 1];
-    if (last && last.label === o.slot_label) last.orders.push(o);
-    else slots.push({ label: o.slot_label, orders: [o] });
-  }
+  // Part 7d: soonest promised first (orders without an estimate, from before 7d, by time placed).
+  const due = (o: AdminOrder) => o.estimated_delivery_at ?? o.created_at;
+  const active = orders.filter((o) => !isKitchenDone(o.status)).sort((a, b) => due(a).localeCompare(due(b)));
+  const refunds = orders.filter((o) => o.refund_status === 'pending');
+  const done = orders.filter((o) => isKitchenDone(o.status) && o.refund_status !== 'pending');
+  const prep = store?.prep_minutes ?? 20;
   const count = (s: OrderStatus[]) => orders.filter((o) => s.includes(o.status)).length;
 
   return (
@@ -258,6 +294,17 @@ export default function KitchenScreen() {
             />
           )}
         </View>
+        <Pressable
+          style={styles.prepRow}
+          onPress={() => setPrepOpen(true)}
+          accessibilityRole="button"
+          accessibilityLabel={`Cooking time ${prep} minutes. Change`}>
+          <View style={styles.flex}>
+            <Text style={styles.prepTitle}>Cooking time {prep} min</Text>
+            <Text style={styles.storeHint}>+2 min per waiting order, then travel time</Text>
+          </View>
+          <Text style={styles.link}>Change</Text>
+        </Pressable>
         <View style={styles.dayRow}>
           <Pill label="Today" selected={day === 'today'} onPress={() => switchDay('today')} style={styles.flex} />
           <Pill
@@ -295,13 +342,13 @@ export default function KitchenScreen() {
         ) : (
           <>
             {error ? <Text style={styles.staleNote}>Couldn&apos;t refresh: {error}</Text> : null}
-            {slots.length === 0 ? <Text style={[styles.muted, styles.empty]}>All done for this day. 🎉</Text> : null}
-            {slots.map((slot) => (
-              <View key={slot.label} style={styles.slot}>
-                <Text style={styles.slotTitle}>
-                  {slot.label} · {slot.orders.length}
-                </Text>
-                {slot.orders.map((o) => (
+            {active.length === 0 && refunds.length === 0 ? (
+              <Text style={[styles.muted, styles.empty]}>All done for this day. 🎉</Text>
+            ) : null}
+            {active.length > 0 ? (
+              <View style={styles.slot}>
+                <Text style={styles.slotTitle}>In progress · {active.length} · soonest first</Text>
+                {active.map((o) => (
                   <KitchenOrderCard
                     key={o.id}
                     order={o}
@@ -309,10 +356,27 @@ export default function KitchenScreen() {
                     onNext={(next) => onNext(o, next)}
                     onCancel={() => setCancelTarget(o)}
                     onAssign={() => setAssignTarget(o)}
+                    onDelay={() => setDelayTarget(o)}
                   />
                 ))}
               </View>
-            ))}
+            ) : null}
+            {refunds.length > 0 ? (
+              <View style={styles.slot}>
+                <Text style={[styles.slotTitle, { color: Colors.info }]}>Refunds to do · {refunds.length}</Text>
+                {refunds.map((o) => (
+                  <KitchenOrderCard
+                    key={o.id}
+                    order={o}
+                    busy={false}
+                    onNext={() => {}}
+                    onCancel={() => {}}
+                    onAssign={() => {}}
+                    onRefund={() => setRefundTarget(o)}
+                  />
+                ))}
+              </View>
+            ) : null}
             {done.length > 0 ? (
               <View style={styles.slot}>
                 <Pressable onPress={() => setShowDone((v) => !v)} style={styles.doneToggle} hitSlop={6}>
@@ -354,6 +418,25 @@ export default function KitchenScreen() {
           setAssignTarget(null);
         }}
       />
+      <DelaySheet
+        key={delayTarget ? `delay-${delayTarget.id}` : 'no-delay'}
+        order={delayTarget}
+        onClose={() => setDelayTarget(null)}
+        onConfirm={delayBy}
+      />
+      <RefundSheet
+        key={refundTarget ? `refund-${refundTarget.id}` : 'no-refund'}
+        order={refundTarget}
+        onClose={() => setRefundTarget(null)}
+        onConfirm={saveRefund}
+      />
+      <PrepTimeSheet
+        key={prepOpen ? `prep-${prep}` : 'prep-closed'}
+        visible={prepOpen}
+        current={prep}
+        onClose={() => setPrepOpen(false)}
+        onConfirm={savePrep}
+      />
       <KitchenCancelSheet
         key={cancelTarget?.id ?? 'none'}
         order={cancelTarget}
@@ -392,6 +475,16 @@ const styles = StyleSheet.create({
   storeRowClosed: { backgroundColor: Colors.dangerSoft },
   storeTitle: { fontSize: 14, fontWeight: '800', color: Colors.success },
   storeTitleClosed: { color: Colors.danger },
+  prepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+  },
+  prepTitle: { fontSize: 14, fontWeight: '800', color: Colors.text },
   storeHint: { fontSize: 12, color: Colors.textMuted, marginTop: 2 },
   counts: {
     flexDirection: 'row',

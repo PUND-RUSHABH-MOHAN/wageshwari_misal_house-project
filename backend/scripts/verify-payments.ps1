@@ -1,10 +1,12 @@
 <#
 .SYNOPSIS
   Checks the deployed direct-UPI payment flow (Part 7) with an account in the Cognito `admin`
-  group, acting as both customer and kitchen. No real money moves: it places ONE UPI order for
-  tomorrow, reports a made-up 12-digit UTR, confirms "Payment received" as the kitchen, and then
-  cancels the order from the kitchen with the reason "Verify script test".
+  group, acting as both customer and kitchen. No real money moves: it places ONE UPI order (today,
+  now), reports a made-up 12-digit UTR, confirms "Payment received" as the kitchen, then cancels it
+  as the customer (part 7d: allowed until out for delivery), which puts it in "refund pending".
+  The kitchen then records "no refund due" (nothing was really paid).
   A second order is placed and cancelled by the customer before paying.
+  Orders are only taken 9:00 AM - 8:30 PM India time; outside those hours the script stops early.
   Works in Windows PowerShell 5.1 and PowerShell 7.
 
 .EXAMPLE
@@ -59,7 +61,9 @@ function Assert([string] $Label, [bool] $Condition, [string] $Extra = "") {
 function New-Key { return "verify-" + [Guid]::NewGuid().ToString("N") }
 
 $istNow = [DateTime]::UtcNow.AddHours(5.5)
-$tomorrow = $istNow.AddDays(1).ToString("yyyy-MM-dd")
+$today = $istNow.ToString("yyyy-MM-dd")
+$minutesNow = $istNow.Hour * 60 + $istNow.Minute
+$orderingOpen = ($minutesNow -ge 9 * 60) -and ($minutesNow -le 20 * 60 + 30)  # store.py: 9:00 - 20:30 IST
 
 $secure = Read-Host "Password for $Email" -AsSecureString
 $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
@@ -90,15 +94,24 @@ try {
   $item = $menu | Sort-Object price | Select-Object -Last 1
   $qty = [int] [Math]::Max(1, [Math]::Ceiling(10000 / $item.price))
   $body = @{
-    address_id = $addressId; delivery_date = $tomorrow; slot_label = "Afternoon 12:00 - 1:00 PM"; payment_method = "online"
+    address_id = $addressId; payment_method = "online"
     items = @(@{ product_id = $item.id; quantity = $qty })
   }
 
+  if (-not $orderingOpen) {
+    Check "order now is refused (kitchen closed)" (Invoke-Api POST "/orders" $body -Token $t -Key (New-Key)) 409 "KITCHEN_CLOSED"
+    Write-Host "SKIP  the payment flow: run again between 9:00 AM and 8:30 PM IST." -ForegroundColor Yellow
+    $body = $null
+  }
+
+  if ($body) {
   Write-Host "--- Customer cancels before paying ---"
   $a = Invoke-Api POST "/orders" $body -Token $t -Key (New-Key)
   Check "place a UPI order" $a 201 -Extra "$($a.Body.order_number) $($a.Body.status)"
   if ($a.Status -eq 201) {
-    Check "cancel before paying" (Invoke-Api POST "/orders/$($a.Body.id)/cancel" -Token $t) 200
+    $ac = Invoke-Api POST "/orders/$($a.Body.id)/cancel" -Token $t
+    Check "cancel before paying" $ac 200
+    Assert "  ...nothing to refund" (-not $ac.Body.refund_status) "$($ac.Body.refund_status)"
     Check "paying a cancelled order is refused" (Invoke-Api POST "/orders/$($a.Body.id)/payment" @{ utr = "100000000001" } -Token $t) 409 "ORDER_NOT_PAYABLE"
   }
 
@@ -118,17 +131,27 @@ try {
     $fakeUtr = "9" + (Get-Random -Minimum 10000 -Maximum 99999) + (Get-Random -Minimum 100000 -Maximum 999999)  # made up, 12 digits
     $p = Invoke-Api POST "/orders/$id/payment" @{ utr = $fakeUtr } -Token $t
     Check "send the UTR (I've paid)" $p 200 -Extra "$($p.Body.payment_status) UTR $fakeUtr"
-    Check "customer can't cancel after paying" (Invoke-Api POST "/orders/$id/cancel" -Token $t) 409 "ORDER_NOT_CANCELLABLE"
 
-    $board = Invoke-Api GET "/admin/orders?date=$tomorrow" -Token $t
+    $board = Invoke-Api GET "/admin/orders?date=$today" -Token $t
     $onBoard = @($board.Body | Where-Object { $_.id -eq $id })
     Assert "kitchen sees it with the UTR" (($onBoard.Count -eq 1) -and ($onBoard[0].utr -eq $fakeUtr))
     Check "can't send it out before payment" (Invoke-Api POST "/admin/orders/$id/status" @{ status = "OUT_FOR_DELIVERY" } -Token $t) 409 "INVALID_STATUS_CHANGE"
     $c = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CONFIRMED" } -Token $t
     Check "kitchen: Payment received" $c 200 -Extra "$($c.Body.status) / $($c.Body.payment_status)"
     Assert "order is paid, link gone" (($c.Body.payment_status -eq "paid") -and (-not $c.Body.upi_payment))
-    $x = Invoke-Api POST "/admin/orders/$id/status" @{ status = "CANCELLED"; reason = "Verify script test" } -Token $t
-    Check "clean up: kitchen cancels the test order" $x 200 -Extra $x.Body.status
+
+    Write-Host "`n--- Customer cancels a paid order: refund by hand (part 7d) ---"
+    $x = Invoke-Api POST "/orders/$id/cancel" -Token $t
+    Check "customer cancels after paying" $x 200 -Extra "$($x.Body.status) / refund $($x.Body.refund_status)"
+    Assert "  ...refund is pending (not marked refunded)" ($x.Body.refund_status -eq "pending") "$($x.Body.refund_status)"
+    Check "refund status must be refunded or not_needed" (Invoke-Api POST "/admin/orders/$id/refund" @{ status = "done" } -Token $t) 400 "VALIDATION_ERROR"
+    # The UTR was made up and no money arrived, so the honest answer is "no refund due".
+    $r = Invoke-Api POST "/admin/orders/$id/refund" @{ status = "not_needed"; reference = "verify script" } -Token $t
+    Check "kitchen: no payment arrived" $r 200 -Extra "$($r.Body.refund_status) by $($r.Body.refunded_by)"
+    Check "recording it twice is refused" (Invoke-Api POST "/admin/orders/$id/refund" @{ status = "refunded" } -Token $t) 409 "NO_REFUND_PENDING"
+    $mine = Invoke-Api GET "/orders/$id" -Token $t
+    Assert "customer sees 'no refund due'" ($mine.Body.refund_status -eq "not_needed") "$($mine.Body.refund_status)"
+  }
   }
 } finally {
   if ($tempAddress) {

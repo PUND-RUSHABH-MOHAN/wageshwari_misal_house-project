@@ -11,7 +11,6 @@ import {
   Button,
   Card,
   EmptyState,
-  Pill,
   QuantityStepper,
   SectionTitle,
   Tag,
@@ -21,19 +20,13 @@ import {
 import { HOME_HREF } from '@/constants/routes';
 import { Colors, Fonts, Radius, Shadow, Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
-import { errorMessage } from '@/services/api';
+import { useDeliveryEstimate } from '@/hooks/useDeliveryEstimate';
+import { errorMessage, isApiError } from '@/services/api';
 import type { CartItem, PaymentMethod } from '@/types';
-import { formatAddress, formatCurrency, formatDeliveryDate, SPICE_LABELS } from '@/utils/format';
-import {
-  DELIVERY_SLOTS,
-  isSlotAvailable,
-  istDate,
-  MIN_ORDER_PAISE,
-  shortOfMinimum,
-  slotLabel,
-} from '@/utils/pricing';
+import { formatAddress, formatCurrency, SPICE_LABELS } from '@/utils/format';
+import { aboutMinutes, isOrderingOpen, istClockTime, MIN_ORDER_PAISE, shortOfMinimum } from '@/utils/pricing';
 
-type DayKey = 'today' | 'tomorrow';
+const HOURS_MESSAGE = 'We take online orders from 9:00 AM to 8:30 PM. Please order again from 9 AM.';
 
 /** `available: false` shows the option greyed out. */
 const PAYMENT_OPTIONS: { method: PaymentMethod; title: string; hint: string; icon: IconName; available: boolean }[] = [
@@ -65,26 +58,16 @@ export default function CartScreen() {
     }, []),
   );
 
-  const now = new Date();
-  const todayHasSlots = DELIVERY_SLOTS.some((s) => isSlotAvailable(s, true, now));
-
-  const [day, setDay] = useState<DayKey>(todayHasSlots ? 'today' : 'tomorrow');
-  const [slotId, setSlotId] = useState<string | null>(null);
   const [payment, setPayment] = useState<PaymentMethod>('cod');
   const [addressOpen, setAddressOpen] = useState(false);
   const [editing, setEditing] = useState<CartItem | null>(null);
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isToday = day === 'today';
-  const effectiveDay: DayKey = isToday && !todayHasSlots ? 'tomorrow' : day;
-  // Dates and slot times follow India time (IST), like the server.
-  const todayIso = istDate(now);
-  const tomorrowIso = istDate(now, 1);
-  const deliveryDate = effectiveDay === 'today' ? todayIso : tomorrowIso;
-  const availableSlots = DELIVERY_SLOTS.filter((s) => isSlotAvailable(s, effectiveDay === 'today', now));
-  // Keep the user's choice if still valid, otherwise fall back to the first open slot.
-  const selectedSlot = availableSlots.find((s) => s.id === slotId) ?? availableSlots[0] ?? null;
+  // Part 7d: no date or slot to pick. Every order is for now; the server works out the time.
+  const estimate = useDeliveryEstimate(selectedAddress?.id, cart.length > 0);
+  // The clock check (IST) works even before the estimate arrives; the server has the final say.
+  const hoursOpen = estimate ? estimate.can_order || !storeOpen : isOrderingOpen();
 
   if (cart.length === 0) {
     return (
@@ -110,13 +93,13 @@ export default function CartScreen() {
       setError(closedMessage);
       return;
     }
+    if (!hoursOpen) {
+      setError(estimate?.closed_reason ?? HOURS_MESSAGE);
+      return;
+    }
     if (!selectedAddress) {
       setError('Please add a delivery address.');
       setAddressOpen(true);
-      return;
-    }
-    if (!selectedSlot) {
-      setError('Please choose a delivery slot.');
       return;
     }
     if (soldOut.length > 0) {
@@ -132,8 +115,6 @@ export default function CartScreen() {
     try {
       const order = await placeOrder({
         address_id: selectedAddress.id,
-        delivery_date: deliveryDate,
-        slot_label: slotLabel(selectedSlot),
         payment_method: payment,
       });
       if (order.status === 'PENDING_PAYMENT') {
@@ -142,8 +123,8 @@ export default function CartScreen() {
         router.navigate('/orders');
       }
     } catch (e) {
-      // The server re-checks prices, slot, address and stock; show what it said.
-      setError(errorMessage(e));
+      // The server re-checks prices, hours, address and stock; show what it said.
+      setError(isApiError(e) && e.code === 'KITCHEN_CLOSED' ? e.message || HOURS_MESSAGE : errorMessage(e));
     } finally {
       setPlacing(false);
     }
@@ -169,6 +150,14 @@ export default function CartScreen() {
             <View style={styles.flex}>
               <Text style={styles.closedTitle}>Online orders are paused</Text>
               <Text style={styles.closedText}>{closedMessage}</Text>
+            </View>
+          </View>
+        ) : !hoursOpen ? (
+          <View style={styles.closedBanner}>
+            <Icon name="clock" size={18} color={Colors.danger} />
+            <View style={styles.flex}>
+              <Text style={styles.closedTitle}>The kitchen is closed now</Text>
+              <Text style={styles.closedText}>{estimate?.closed_reason ?? HOURS_MESSAGE}</Text>
             </View>
           </View>
         ) : null}
@@ -240,38 +229,36 @@ export default function CartScreen() {
           )}
         </Card>
 
-        {/* Slot */}
+        {/* Delivery time: worked out by the server (part 7d); nothing to choose. */}
         <Card>
-          <SectionTitle title="Delivery slot" />
-          <View style={styles.dayRow}>
-            <Pill
-              label="Today"
-              sublabel={todayHasSlots ? formatDeliveryDate(todayIso).slice(0, -5) : 'Slots closed'}
-              selected={effectiveDay === 'today'}
-              disabled={!todayHasSlots}
-              onPress={() => setDay('today')}
-              style={styles.flex}
-            />
-            <Pill
-              label="Tomorrow"
-              sublabel={formatDeliveryDate(tomorrowIso).slice(0, -5)}
-              selected={effectiveDay === 'tomorrow'}
-              onPress={() => setDay('tomorrow')}
-              style={styles.flex}
-            />
-          </View>
-          {/* One-hour slots, 9 AM – 9 PM; today's past slots are left out. */}
-          <View style={styles.slotGrid}>
-            {availableSlots.map((slot) => (
-              <Pill
-                key={slot.id}
-                label={slot.name}
-                sublabel={slot.time}
-                selected={selectedSlot?.id === slot.id}
-                onPress={() => setSlotId(slot.id)}
-                style={styles.slotPill}
-              />
-            ))}
+          <SectionTitle title="Delivery time" />
+          <View style={styles.etaRow}>
+            <View style={styles.etaIcon}>
+              <Icon name="clock" size={20} color={Colors.primary} />
+            </View>
+            <View style={styles.flex}>
+              {estimate && hoursOpen && storeOpen ? (
+                <>
+                  <Text style={styles.etaTitle}>
+                    Estimated delivery {istClockTime(estimate.estimated_delivery_at)}
+                  </Text>
+                  <Text style={styles.etaText}>
+                    {aboutMinutes(estimate.total_minutes)} from now · {estimate.prep_minutes} min cooking +{' '}
+                    {estimate.travel_minutes} min on the road
+                  </Text>
+                </>
+              ) : (
+                <Text style={styles.etaTitle}>
+                  {hoursOpen && storeOpen ? 'Delivered today, as soon as it is ready' : 'Not taking orders right now'}
+                </Text>
+              )}
+              <Text style={styles.etaNote}>
+                {estimate?.approximate
+                  ? 'Add your address for a more exact time. '
+                  : ''}
+                This is an estimate, not a guarantee. We will update it if the kitchen is busy.
+              </Text>
+            </View>
           </View>
         </Card>
 
@@ -326,7 +313,7 @@ export default function CartScreen() {
         </Card>
 
         <Text style={styles.policy}>
-          Orders can be cancelled free of charge until the kitchen starts preparing.
+          You can cancel free of charge until your order is out for delivery.
         </Text>
       </ScrollView>
 
@@ -339,7 +326,9 @@ export default function CartScreen() {
             <Text style={styles.footerHint}>
               {!storeOpen
                 ? 'Online orders paused'
-                : shortBy > 0
+                : !hoursOpen
+                  ? 'Kitchen closed'
+                  : shortBy > 0
                   ? `Add ${formatCurrency(shortBy)} more`
                   : payment === 'cod'
                     ? 'Pay on delivery'
@@ -350,7 +339,7 @@ export default function CartScreen() {
             title="Place Order"
             onPress={handlePlaceOrder}
             loading={placing}
-            disabled={!storeOpen || !selectedSlot || shortBy > 0 || soldOut.length > 0}
+            disabled={!storeOpen || !hoursOpen || shortBy > 0 || soldOut.length > 0}
             style={styles.placeBtn}
           />
         </View>
@@ -434,9 +423,18 @@ const styles = StyleSheet.create({
   addressTitle: { fontSize: 15, fontWeight: '700', color: Colors.text },
   addressText: { fontSize: 13, color: Colors.textMuted, lineHeight: 18, marginTop: 2 },
 
-  dayRow: { flexDirection: 'row', gap: Spacing.sm, marginBottom: Spacing.md },
-  slotGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm },
-  slotPill: { flexBasis: '47%', flexGrow: 1, borderRadius: Radius.md },
+  etaRow: { flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start' },
+  etaIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: Colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  etaTitle: { fontSize: 15, fontWeight: '800', color: Colors.text },
+  etaText: { fontSize: 13, color: Colors.textMuted, marginTop: 2, lineHeight: 18 },
+  etaNote: { fontSize: 12, color: Colors.textSubtle, marginTop: Spacing.xs, lineHeight: 17 },
 
   payGrid: { flexDirection: 'row', gap: Spacing.md },
   payOption: {

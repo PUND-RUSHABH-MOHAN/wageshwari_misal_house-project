@@ -14,7 +14,7 @@ from test_orders import (  # noqa: F401 - clock and env are pytest fixtures used
     ALICE,
     BOB,
     IST,
-    SIX_AM,
+    TEN_AM,
     TODAY,
     TOMORROW,
     clock,
@@ -151,7 +151,7 @@ def test_confirm_twice_does_not_reassign(env):
     _, first = confirm(o["id"])
     stamp = delivery_boys.get_boy(RAMU["sub"])["last_assigned_at"]
     on_duty(SHAM, name="Sham", phone="9123456781")  # a less busy boy appears
-    env["clock"]["now"] = SIX_AM + timedelta(minutes=1)
+    env["clock"]["now"] = TEN_AM + timedelta(minutes=1)
     status, again = confirm(o["id"])
     assert status == 200 and again["auto_assign"] == "unchanged"
     assert again["delivery_boy"]["id"] == RAMU["sub"] and again["status_history"] == first["status_history"]
@@ -174,7 +174,7 @@ def test_auto_assign_balances_and_breaks_ties_by_wait(env):
     on_duty(SHAM, name="Sham", phone="9123456781")
     picks = []
     for n, who in enumerate((ALICE, BOB, ALICE)):
-        env["clock"]["now"] = SIX_AM + timedelta(minutes=n)
+        env["clock"]["now"] = TEN_AM + timedelta(minutes=n)
         o = order(who, key=f"bal-key-{n:04d}")
         picks.append(confirm(o["id"])[1]["delivery_boy"]["id"])
     # first two go to different boys; the third to whoever waited longest (both have 1)
@@ -331,8 +331,6 @@ def test_kitchen_cancel_after_assignment(env):
     on_duty(RAMU)
     o = order()
     confirm(o["id"])
-    status, out, _ = invoke(orders, ev("POST /orders/{id}/cancel", order_id=o["id"]))
-    assert status == 409 and "delivery boy" in out["error"]["message"]  # the customer can't anymore
     assert admin_move(o["id"], "CANCELLED", reason="Customer called to cancel")[0] == 200
     [job] = my_orders()
     assert job["status"] == "CANCELLED" and job["cancel_reason"] == "Customer called to cancel"
@@ -351,15 +349,17 @@ def test_admin_fallback_steps(env):
     assert out["status"] == "DELIVERED" and out["payment_status"] == "paid"
 
 
-def test_tomorrows_assigned_order_is_listed_and_finished_old_ones_are_not(env):
+def test_yesterdays_finished_orders_drop_off_the_list(env):
     on_duty(RAMU)
-    o = order(delivery_date=TOMORROW)
+    o = order()
     confirm(o["id"])
-    assert [x["delivery_date"] for x in my_orders()] == [TOMORROW]
     step(o["id"], "OUT_FOR_DELIVERY")
     step(o["id"], "DELIVERED")
-    assert my_orders() == []  # delivered, but for tomorrow: not "today's finished"
-    assert TODAY  # (imported for readability of dates above)
+    assert [x["delivery_date"] for x in my_orders()] == [TODAY]
+    env["clock"]["now"] = TEN_AM + timedelta(days=1)
+    on_duty(RAMU)
+    assert my_orders() == []  # yesterday's delivered order isn't "today's finished"
+    assert TOMORROW  # (imported for readability)
 
 
 # ---------------------------------------------------------------- admin: delivery boy list

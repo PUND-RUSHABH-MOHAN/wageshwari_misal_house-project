@@ -23,6 +23,7 @@ import json
 from typing import Any
 
 import delivery_boys
+import eta
 import orders
 import users
 from common import ApiError, _json_default, dispatch, groups_from_claims, jwt_claims, parse_body, response
@@ -52,7 +53,8 @@ def to_delivery_order(item: dict) -> dict:
         "order_number": item["order_number"],
         "status": item["status"],
         "delivery_date": item["delivery_date"],
-        "slot_label": item["slot_label"],
+        "slot_label": item.get("slot_label", ""),  # orders from before part 7d only
+        "estimated_delivery_at": item.get("estimated_delivery_at"),
         "total": int(item["total"]),
         "payment_method": item.get("payment_method"),
         "payment_status": item.get("payment_status"),
@@ -77,8 +79,10 @@ def to_delivery_order(item: dict) -> dict:
         out["items"] = []  # finished: keep just the summary
         if item.get("delivered_at"):
             out["delivered_at"] = item["delivered_at"]
-        if item["status"] == "CANCELLED" and item.get("cancel_reason"):
-            out["cancel_reason"] = item["cancel_reason"]
+        if item["status"] == "CANCELLED":
+            out["cancelled_by"] = item.get("cancelled_by")
+            if item.get("cancel_reason"):
+                out["cancel_reason"] = item["cancel_reason"]
     return _plain(out)
 
 
@@ -121,6 +125,7 @@ def list_orders(event: dict) -> dict:
         key=lambda i: (
             i["status"] not in delivery_boys.ACTIVE,  # active first
             i["delivery_date"],
+            i.get("estimated_delivery_at") or "",
             int(i.get("slot_start_hour", 0)),
             i.get("created_at", ""),
         )
@@ -152,13 +157,17 @@ def change_status(event: dict) -> dict:
         return response(200, to_delivery_order(order))  # double tap: nothing changes
     if NEXT.get(current) != new:
         if current == "CANCELLED":
-            message = "The hotel cancelled this order. Please don't deliver it."
+            who = "The customer" if order.get("cancelled_by") == "customer" else "The hotel"
+            message = f"{who} cancelled this order. Please don't deliver it."
         else:
             message = f"This order is {current.lower().replace('_', ' ')}; it can't go to {new.lower().replace('_', ' ')}."
         raise ApiError(409, "INVALID_STATUS_CHANGE", message)
     now = _now()
     sets: list[str] = []
     values: dict[str, Any] = {}
+    if new == "OUT_FOR_DELIVERY":  # picked up: the estimate becomes now + travel (part 7d)
+        sets.append("estimated_delivery_at = :eta")
+        values[":eta"] = eta.after_pickup(orders._now_utc(), eta.travel_for(order))
     if new == "DELIVERED":
         sets.append("delivered_at = :now")
         if order.get("payment_method") == "cod":

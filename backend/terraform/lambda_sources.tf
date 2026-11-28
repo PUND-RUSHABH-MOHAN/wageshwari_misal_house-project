@@ -4,16 +4,17 @@
 locals {
   lambda_sources = {
     "addresses.py" = join("", [local.lambda_src_addresses_1, local.lambda_src_addresses_2, local.lambda_src_addresses_3, local.lambda_src_addresses_4, local.lambda_src_addresses_5])
-    "admin.py" = join("", [local.lambda_src_admin_1, local.lambda_src_admin_2, local.lambda_src_admin_3, local.lambda_src_admin_4, local.lambda_src_admin_5, local.lambda_src_admin_6, local.lambda_src_admin_7, local.lambda_src_admin_8, local.lambda_src_admin_9])
+    "admin.py" = join("", [local.lambda_src_admin_1, local.lambda_src_admin_2, local.lambda_src_admin_3, local.lambda_src_admin_4, local.lambda_src_admin_5, local.lambda_src_admin_6, local.lambda_src_admin_7, local.lambda_src_admin_8, local.lambda_src_admin_9, local.lambda_src_admin_10, local.lambda_src_admin_11])
     "auth.py" = join("", [local.lambda_src_auth_1, local.lambda_src_auth_2, local.lambda_src_auth_3, local.lambda_src_auth_4])
     "catalog.py" = join("", [local.lambda_src_catalog_1, local.lambda_src_catalog_2])
     "common.py" = join("", [local.lambda_src_common_1, local.lambda_src_common_2, local.lambda_src_common_3])
     "delivery.py" = join("", [local.lambda_src_delivery_1, local.lambda_src_delivery_2, local.lambda_src_delivery_3])
     "delivery_boys.py" = join("", [local.lambda_src_delivery_boys_1, local.lambda_src_delivery_boys_2, local.lambda_src_delivery_boys_3, local.lambda_src_delivery_boys_4])
+    "eta.py" = join("", [local.lambda_src_eta_1, local.lambda_src_eta_2])
     "expire.py" = join("", [local.lambda_src_expire_1, local.lambda_src_expire_2])
     "me.py" = join("", [local.lambda_src_me])
     "orders.py" = join("", [local.lambda_src_orders_1, local.lambda_src_orders_2, local.lambda_src_orders_3, local.lambda_src_orders_4, local.lambda_src_orders_5, local.lambda_src_orders_6, local.lambda_src_orders_7, local.lambda_src_orders_8, local.lambda_src_orders_9, local.lambda_src_orders_10, local.lambda_src_orders_11])
-    "store.py" = join("", [local.lambda_src_store])
+    "store.py" = join("", [local.lambda_src_store_1, local.lambda_src_store_2])
     "users.py" = join("", [local.lambda_src_users_1, local.lambda_src_users_2])
   }
 }

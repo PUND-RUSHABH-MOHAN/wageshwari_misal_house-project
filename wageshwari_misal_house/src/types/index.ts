@@ -121,6 +121,8 @@ export type OrderStatus =
   | 'CANCELLED';
 
 export type PaymentMethod = 'cod' | 'online';
+/** Part 7d: refunds for cancelled UPI orders are done by hand in the hotel's UPI app. */
+export type RefundStatus = 'pending' | 'refunded' | 'not_needed';
 /** UPI: pending -> submitted (customer sent a UTR) -> paid (kitchen checked). COD: pending -> paid on delivery. */
 export type PaymentStatus = 'pending' | 'submitted' | 'paid';
 
@@ -156,9 +158,10 @@ export interface Order {
   user_id: ID;
   /** Frozen copy of the address at checkout (JSONB column). */
   address_snapshot: Address;
-  /** YYYY-MM-DD */
+  /** YYYY-MM-DD (IST). Since part 7d always the day it was placed. */
   delivery_date: string;
-  slot_label: string;
+  /** Only on orders placed before part 7d (customers picked a slot then). */
+  slot_label?: string;
   status: OrderStatus;
   subtotal: Paise;
   delivery_fee: Paise;
@@ -180,6 +183,29 @@ export interface Order {
   delivery_boy?: { name: string; phone?: string };
   /** ISO timestamp, once delivered. */
   delivered_at?: string;
+  /** ISO timestamp, once cancelled. */
+  cancelled_at?: string;
+  // Part 7d: delivery estimate, worked out by the server (eta.py). Missing on older orders.
+  /** ISO time the order should reach the customer. An estimate, not a promise. */
+  estimated_delivery_at?: string;
+  /** The first estimate, given when the order was placed. */
+  original_estimated_delivery_at?: string;
+  /** Cooking time used for the first estimate (base + kitchen queue), minutes. */
+  prep_minutes?: number;
+  /** Travel time from the hotel to the address, minutes. */
+  travel_minutes?: number;
+  /** How much later than first promised, in minutes (only when later). */
+  delay_minutes?: number;
+  /** True when 10+ minutes later than first promised and not finished: show "Delayed". */
+  delayed?: boolean;
+  /** Optional reason the kitchen gave when pushing the estimate later. */
+  delay_reason?: string;
+  /**
+   * Cancelled UPI orders the customer had paid (or sent a UTR for): the hotel refunds by hand.
+   * pending -> refunded (with `refund_reference`) or not_needed (no money arrived).
+   */
+  refund_status?: RefundStatus;
+  refund_reference?: string;
   /** ISO timestamp — standard created_at column. */
   created_at: string;
   /** Joined order_items rows (GET /orders/:id?include=items). */
@@ -196,19 +222,25 @@ export interface BillBreakdown {
   total: Paise;
 }
 
-export interface DeliverySlot {
-  id: string;
-  name: string;
-  time: string;
-  /** 24h hour at which the slot begins; used for same-day cutoff. */
-  start_hour: number;
-}
-
+/** Part 7d: no date or slot. Every order is for today, now; the server works out the time. */
 export interface PlaceOrderInput {
   address_id: ID;
-  delivery_date: string;
-  slot_label: string;
   payment_method: PaymentMethod;
+}
+
+/** GET /orders/estimate: what an order placed now would get (part 7d). */
+export interface DeliveryEstimate {
+  prep_minutes: number;
+  travel_minutes: number;
+  total_minutes: number;
+  /** ISO time */
+  estimated_delivery_at: string;
+  /** True when no address was known, so a typical distance was used. */
+  approximate: boolean;
+  /** Would an order placed now be accepted? */
+  can_order: boolean;
+  /** Why not, when `can_order` is false. */
+  closed_reason?: string;
 }
 
 export type LoginInput =
@@ -237,6 +269,10 @@ export interface AdminOrder extends Omit<Order, 'delivery_boy'> {
   assigned_by?: string;
   /** Only on the answer to a confirm. */
   auto_assign?: AutoAssign;
+  /** Part 7d: who last pushed the estimate later. */
+  eta_updated_by?: string;
+  refunded_at?: string;
+  refunded_by?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +298,10 @@ export interface DeliveryOrder {
   order_number: string;
   status: OrderStatus;
   delivery_date: string;
+  /** Orders from before part 7d only ("" otherwise). */
   slot_label: string;
+  /** Part 7d: when the customer expects it. */
+  estimated_delivery_at?: string | null;
   total: Paise;
   payment_method: PaymentMethod;
   payment_status: PaymentStatus;
@@ -284,6 +323,8 @@ export interface DeliveryOrder {
   collect_cash?: Paise;
   assigned_at?: string;
   delivered_at?: string;
+  /** Cancelled orders: who cancelled it. */
+  cancelled_by?: 'customer' | 'kitchen' | 'system';
   cancel_reason?: string;
 }
 
@@ -304,6 +345,10 @@ export interface StoreStatus {
   opens_at: string;
   /** "21:00" (IST) */
   closes_at: string;
+  /** Part 7d: last time an order is taken, "20:30" (IST). */
+  last_order_at?: string;
+  /** Part 7d: base cooking time in minutes, set in the Kitchen tab (5–90). */
+  prep_minutes?: number;
 }
 
 /** What PATCH /admin/store returns: the status plus who changed it last. */
