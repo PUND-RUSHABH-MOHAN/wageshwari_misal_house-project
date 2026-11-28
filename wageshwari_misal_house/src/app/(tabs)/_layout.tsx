@@ -6,7 +6,7 @@ import { Colors, Fonts } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
 
 export default function TabsLayout() {
-  const { cartCount, isAdmin } = useApp();
+  const { cartCount, isAdmin, isDeliveryBoy } = useApp();
   const insets = useSafeAreaInsets();
   const bottomPad = Math.max(insets.bottom, 8);
 
@@ -56,6 +56,15 @@ export default function TabsLayout() {
           // Admins only. `href: null` hides the tab for everyone else (the server also checks).
           href: isAdmin ? undefined : null,
           tabBarIcon: ({ color }) => <Icon name="store" color={color} size={26} />,
+        }}
+      />
+      <Tabs.Screen
+        name="deliveries"
+        options={{
+          title: 'Deliveries',
+          // Delivery boys only (Cognito group `delivery`, part 7c); the server also checks.
+          href: isDeliveryBoy ? undefined : null,
+          tabBarIcon: ({ color }) => <Icon name="delivery" color={color} size={26} />,
         }}
       />
       <Tabs.Screen

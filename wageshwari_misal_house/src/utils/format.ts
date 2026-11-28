@@ -80,9 +80,11 @@ export const SPICE_LABELS: Record<SpiceLevel, string> = {
 };
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
+  PENDING: 'Waiting for hotel',
   PENDING_PAYMENT: 'Payment Pending',
   CONFIRMED: 'Confirmed',
   PREPARING: 'Preparing',
+  ASSIGNED: 'Delivery boy assigned',
   OUT_FOR_DELIVERY: 'Out for Delivery',
   DELIVERED: 'Delivered',
   CANCELLED: 'Cancelled',

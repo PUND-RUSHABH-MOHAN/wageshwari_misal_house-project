@@ -16,6 +16,7 @@ from common import (
     parse_body,
     response,
     role_from_claims,
+    roles_from_claims,
     validate_name,
     validate_phone,
 )
@@ -30,7 +31,7 @@ def reset_clients() -> None:
 def get_me(event: dict) -> dict:
     claims = jwt_claims(event)
     profile = users.get_or_create_profile(claims["sub"], email=claims.get("email", ""))
-    return response(200, users.to_user(profile, role_from_claims(claims)))
+    return response(200, users.to_user(profile, role_from_claims(claims), roles_from_claims(claims)))
 
 
 def patch_me(event: dict) -> dict:
@@ -49,7 +50,7 @@ def patch_me(event: dict) -> dict:
         raise ApiError(400, "VALIDATION_ERROR", "Send at least one of `name`, `phone`.")
 
     profile = users.update_profile(claims["sub"], changes, email=claims.get("email", ""))
-    return response(200, users.to_user(profile, role_from_claims(claims)))
+    return response(200, users.to_user(profile, role_from_claims(claims), roles_from_claims(claims)))
 
 
 ROUTES = {

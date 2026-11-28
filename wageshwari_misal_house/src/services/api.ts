@@ -13,6 +13,8 @@ import type {
   AdminOrder,
   AdminProduct,
   AdminStore,
+  DeliveryBoy,
+  DeliveryOrder,
   Category,
   Order,
   OrderStatus,
@@ -249,11 +251,27 @@ export const adminApi = {
   /** Orders for one delivery day (YYYY-MM-DD, IST), by slot then time. */
   orders: (token: string, date: string) =>
     request<AdminOrder[]>('GET', `/admin/orders?date=${encodeURIComponent(date)}`, { token }),
-  /** Next step (PREPARING / OUT_FOR_DELIVERY / DELIVERED), or CANCELLED with a reason. */
+  /**
+   * CONFIRMED (= "Confirm order"; also auto-assigns a delivery boy, see `auto_assign` on the answer),
+   * OUT_FOR_DELIVERY / DELIVERED (fallback for the delivery boy), or CANCELLED with a reason.
+   */
   setStatus: (token: string, id: string, status: OrderStatus, reason?: string) =>
     request<AdminOrder>('POST', `/admin/orders/${encodeURIComponent(id)}/status`, {
       token,
       body: reason === undefined ? { status } : { status, reason },
+    }),
+  /** Assign (or reassign) a confirmed order to a delivery boy by hand (part 7c). */
+  assign: (token: string, id: string, deliveryBoyId: string) =>
+    request<AdminOrder>('POST', `/admin/orders/${encodeURIComponent(id)}/assign`, {
+      token,
+      body: { delivery_boy_id: deliveryBoyId },
+    }),
+  /** Everyone in the delivery group who has opened the Deliveries tab, on duty first. */
+  deliveryBoys: (token: string) => request<DeliveryBoy[]>('GET', '/admin/delivery-boys', { token }),
+  takeOffDuty: (token: string, id: string) =>
+    request<DeliveryBoy>('PATCH', `/admin/delivery-boys/${encodeURIComponent(id)}`, {
+      token,
+      body: { on_duty: false },
     }),
   categories: (token: string) => request<Category[]>('GET', '/admin/categories', { token }),
   createCategory: (token: string, body: CategoryInput) =>
@@ -270,5 +288,20 @@ export const adminApi = {
     request<AdminStore>('PATCH', '/admin/store', {
       token,
       body: message ? { accepting_orders, message } : { accepting_orders },
+    }),
+};
+
+/** The delivery boy's Deliveries tab (part 7c). Needs the Cognito group `delivery`. */
+export const deliveryApi = {
+  me: (token: string) => request<DeliveryBoy>('GET', '/delivery/me', { token }),
+  setOnDuty: (token: string, on_duty: boolean) =>
+    request<DeliveryBoy>('PATCH', '/delivery/me', { token, body: { on_duty } }),
+  /** My active deliveries (full details) and today's finished ones (summary only). */
+  orders: (token: string) => request<DeliveryOrder[]>('GET', '/delivery/orders', { token }),
+  /** "Picked up" (OUT_FOR_DELIVERY) or DELIVERED. */
+  setStatus: (token: string, id: string, status: 'OUT_FOR_DELIVERY' | 'DELIVERED') =>
+    request<DeliveryOrder>('POST', `/delivery/orders/${encodeURIComponent(id)}/status`, {
+      token,
+      body: { status },
     }),
 };

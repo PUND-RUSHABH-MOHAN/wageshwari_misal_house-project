@@ -127,7 +127,7 @@ def test_place_order_happy_path(env):
     status, o, _ = place(adr)
     assert status == 201, o
     assert o["order_number"] == "WMH-20261113-0001"
-    assert o["status"] == "CONFIRMED" and o["payment_status"] == "pending" and o["payment_method"] == "cod"
+    assert o["status"] == "PENDING" and o["payment_status"] == "pending" and o["payment_method"] == "cod"
     assert o["user_id"] == ALICE["sub"]
     assert (o["subtotal"], o["delivery_fee"], o["tax"], o["total"]) == (21000, 3000, 1050, 25050)
     assert o["delivery_date"] == TODAY and o["slot_label"] == MORNING
@@ -425,8 +425,8 @@ def test_cancel_confirmed_order(env):
     assert status == 200 and again["status"] == "CANCELLED"
 
 
-@pytest.mark.parametrize("status_now", ["PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"])
-def test_cannot_cancel_once_kitchen_started(env, status_now):
+@pytest.mark.parametrize("status_now", ["PREPARING", "ASSIGNED", "OUT_FOR_DELIVERY", "DELIVERED"])
+def test_cannot_cancel_once_assigned(env, status_now):
     adr = make_address()
     _, o, _ = place(adr)
     env["table"].update_item(

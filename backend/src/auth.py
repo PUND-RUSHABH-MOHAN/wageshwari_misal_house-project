@@ -34,6 +34,7 @@ from common import (
     require_str,
     response,
     role_from_claims,
+    roles_from_claims,
     validate_code,
     validate_email,
     validate_name,
@@ -214,7 +215,7 @@ def login(event: dict) -> dict:
             "token": tokens["IdToken"],
             "refresh_token": tokens["RefreshToken"],
             "expires_in": tokens["ExpiresIn"],
-            "user": users.to_user(profile, role_from_claims(claims)),
+            "user": users.to_user(profile, role_from_claims(claims), roles_from_claims(claims)),
         },
     )
 

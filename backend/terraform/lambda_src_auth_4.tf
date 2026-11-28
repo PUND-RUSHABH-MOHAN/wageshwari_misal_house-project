@@ -2,6 +2,7 @@
 
 locals {
   lambda_src_auth_4 = <<PYSRC
+def logout(event: dict) -> dict:
     """Revoke this device's refresh token. Idempotent: an already-invalid token is fine."""
     body = parse_body(event)
     refresh_token = require_str(body, "refresh_token", max_len=8192)

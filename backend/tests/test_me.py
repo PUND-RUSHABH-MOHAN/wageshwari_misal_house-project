@@ -33,6 +33,7 @@ def test_get_me_returns_user(aws):
         "phone": "9876543210",
         "email": "user@example.com",
         "role": "customer",
+        "roles": [],
         "is_active": True,
     }
 
@@ -41,7 +42,15 @@ def test_get_me_admin_from_api_gateway_group_string(aws):
     # API Gateway passes array claims as a string like "[admin]".
     seed_profile(aws)
     status, body = call(me, "GET /me", claims={**CLAIMS, "cognito:groups": "[admin]"})
-    assert status == 200 and body["role"] == "admin"
+    assert status == 200 and body["role"] == "admin" and body["roles"] == ["admin"]
+
+
+def test_get_me_staff_roles(aws):
+    seed_profile(aws)
+    status, body = call(me, "GET /me", claims={**CLAIMS, "cognito:groups": "[delivery admin]"})
+    assert status == 200 and body["role"] == "admin" and body["roles"] == ["admin", "delivery"]
+    _, body = call(me, "GET /me", claims={**CLAIMS, "cognito:groups": ["delivery"]})
+    assert body["role"] == "customer" and body["roles"] == ["delivery"]
 
 
 def test_get_me_creates_missing_profile(aws):

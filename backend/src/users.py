@@ -39,14 +39,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def to_user(item: dict, role: str) -> dict:
-    """DynamoDB item -> the app's `User` (src/types/index.ts)."""
+def to_user(item: dict, role: str, roles: list[str] | None = None) -> dict:
+    """DynamoDB item -> the app's `User` (src/types/index.ts). `roles` lists staff groups
+    (admin, delivery); `role` stays "admin" / "customer" for older app builds."""
     return {
         "id": item["user_id"],
         "name": item.get("name", ""),
         "phone": item.get("phone", ""),
         "email": item.get("email", ""),
         "role": role,
+        "roles": roles if roles is not None else ([role] if role != "customer" else []),
         "is_active": bool(item.get("is_active", True)),
     }
 

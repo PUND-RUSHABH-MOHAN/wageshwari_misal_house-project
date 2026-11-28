@@ -1,4 +1,4 @@
-"""Admin Lambda: the kitchen's order board and menu management.
+"""Admin Lambda: the kitchen's order board, delivery assignment and menu management.
 
 Every route needs a valid login (API Gateway's JWT authorizer) AND membership of the Cognito
 group `admin` (checked here; anyone else gets 403 FORBIDDEN).
@@ -6,7 +6,13 @@ group `admin` (checked here; anyone else gets 403 FORBIDDEN).
 Routes
   GET   /admin/orders?date=YYYY-MM-DD   orders for a delivery day (default: today in IST),
                                          by slot then time                      -> AdminOrder[]
-  POST  /admin/orders/{id}/status       {status, reason?}: next step or cancel  -> AdminOrder
+  POST  /admin/orders/{id}/status       {status, reason?}: confirm, next step or cancel
+                                                                                 -> AdminOrder
+  POST  /admin/orders/{id}/assign       {delivery_boy_id}: assign / reassign by hand (part 7c)
+                                                                                 -> AdminOrder
+  GET   /admin/delivery-boys            everyone in the `delivery` group who has opened the
+                                         Deliveries tab, on duty first          -> DeliveryBoy[]
+  PATCH /admin/delivery-boys/{id}       {on_duty: false}: take someone off duty  -> DeliveryBoy
   GET   /admin/categories               all categories, hidden ones too         -> Category[]
   POST  /admin/categories               new category                            -> 201 Category
   PATCH /admin/categories/{id}          rename / reorder / show / hide          -> Category
@@ -16,18 +22,23 @@ Routes
   PATCH /admin/store                    {accepting_orders, message?}: stop / restart online
                                          orders (part 7b)                       -> AdminStore
 
-Order status rules
-  - One step forward at a time: CONFIRMED -> PREPARING -> OUT_FOR_DELIVERY -> DELIVERED.
-    DELIVERED also marks a cash order as paid (the rider collected the cash).
-  - UPI orders start at PENDING_PAYMENT. PENDING_PAYMENT -> CONFIRMED means "Payment received":
-    someone checked the hotel's UPI app (amount + order number / UTR); it marks the order paid.
-    If the money never came, cancel with a reason instead.
+Order status rules (part 7c)
+  PENDING (cash) / PENDING_PAYMENT (UPI) -> CONFIRMED -> ASSIGNED -> OUT_FOR_DELIVERY -> DELIVERED
+  - "Confirm order" = status CONFIRMED. For UPI it also means "payment received" (checked by hand
+    in the hotel's UPI app) and marks the order paid. The server then auto-assigns a delivery boy
+    in the same write (delivery_boys.py), so the result is usually ASSIGNED. If nobody is on duty,
+    the order stays CONFIRMED and the response says `auto_assign: "none_available"`; assign by hand.
+  - Confirming an order that is already CONFIRMED / ASSIGNED changes nothing (`auto_assign:
+    "unchanged"`), so a double tap can't assign twice.
+  - Admins can also do the delivery boy's steps (Picked up, Delivered) as a fallback. DELIVERED
+    marks a cash order as paid. Orders from before part 7c may be PREPARING -> OUT_FOR_DELIVERY.
   - The kitchen may cancel any order that isn't delivered yet; a reason (3-120 chars) is
     required and shown to the customer.
   - Each change is conditional on the status the admin saw, so two people tapping at once
     can't skip a step (the second gets 409 ORDER_CHANGED).
 
-AdminOrder = Order (see orders.py) + status_history [{status, at, by}].
+AdminOrder = Order (see orders.py) + status_history [{status, at, by}] + delivery_boy
+  {id, name, phone} / assigned_at / assigned_by when assigned (+ auto_assign after a confirm).
 AdminProduct = Product + is_active. Hidden dishes (is_active = false) vanish from the public
 menu and can't be ordered; sold-out dishes (is_available = false) stay visible but can't be ordered.
 """
@@ -41,21 +52,23 @@ from datetime import date
 from typing import Any
 
 from boto3.dynamodb.conditions import Key
-from botocore.exceptions import ClientError
 
 import catalog
+import delivery_boys
 import orders
 import store
 import users
 from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response, role_from_claims
 
 NEXT_STATUS = {
+    "PENDING": "CONFIRMED",  # cash order: the kitchen accepts it (then auto-assign)
     "PENDING_PAYMENT": "CONFIRMED",  # UPI: payment received (checked by hand in the hotel's UPI app)
-    "CONFIRMED": "PREPARING",
-    "PREPARING": "OUT_FOR_DELIVERY",
+    "ASSIGNED": "OUT_FOR_DELIVERY",  # fallback for the delivery boy's "Picked up"
+    "PREPARING": "OUT_FOR_DELIVERY",  # orders started before part 7c
     "OUT_FOR_DELIVERY": "DELIVERED",
 }
-KITCHEN_CANCELLABLE = ("PENDING_PAYMENT", "CONFIRMED", "PREPARING", "OUT_FOR_DELIVERY")
+KITCHEN_CANCELLABLE = ("PENDING", "PENDING_PAYMENT", "CONFIRMED", "PREPARING", "ASSIGNED", "OUT_FOR_DELIVERY")
+ASSIGNABLE = ("CONFIRMED", "PREPARING", "ASSIGNED")  # ASSIGNED = reassign
 MIN_PRICE_PAISE = 100  # ₹1
 MAX_PRICE_PAISE = 500000  # ₹5,000
 _ID_RE = re.compile(r"^[a-z]{3}_[a-z0-9_]{1,40}$")
@@ -80,9 +93,20 @@ def _path_id(event: dict) -> str:
 # ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
-def to_admin_order(item: dict) -> dict:
+def to_admin_order(item: dict, auto_assign: str | None = None) -> dict:
     out = orders.to_order(item)
     out["status_history"] = json.loads(json.dumps(item.get("status_history", []), default=_json_default))
+    out.pop("delivery_boy", None)
+    if item.get("delivery_boy_id"):
+        out["delivery_boy"] = {
+            "id": item["delivery_boy_id"],
+            "name": item.get("delivery_boy_name", ""),
+            "phone": item.get("delivery_boy_phone", ""),
+        }
+        out["assigned_at"] = item.get("assigned_at")
+        out["assigned_by"] = item.get("assigned_by")
+    if auto_assign:
+        out["auto_assign"] = auto_assign
     return out
 
 
@@ -121,6 +145,51 @@ def _find_order(order_id: str) -> dict:
     return orders._get_order_item(ref["user_id"], order_id)
 
 
+def _changed(err: Exception) -> ApiError:
+    return ApiError(409, "ORDER_CHANGED", "Someone else just updated this order. Pull down to refresh and try again.")
+
+
+def _confirm(order: dict, by: str, now: str) -> dict:
+    """PENDING / PENDING_PAYMENT -> CONFIRMED, then straight to ASSIGNED if a delivery boy is free."""
+    sets: list[str] = []
+    values: dict[str, Any] = {}
+    if order["status"] == "PENDING_PAYMENT":  # the UPI money is in
+        sets += ["payment_status = :paid", "payment_verified_at = :now", "payment_verified_by = :by"]
+        values.update({":paid": "paid", ":by": by})
+    confirmed = orders.history_entry("CONFIRMED", now, by)
+    for boy in delivery_boys.candidates()[:3]:  # someone may switch off duty meanwhile: try the next
+        try:
+            item = delivery_boys.write_order(
+                order,
+                status="ASSIGNED",
+                history=[confirmed, orders.history_entry("ASSIGNED", now, "auto")],
+                now=now,
+                sets=sets,
+                values=values,
+                boy=boy,
+                by="auto",
+                require_on_duty=True,
+            )
+            return to_admin_order(item, "assigned")
+        except delivery_boys.BoyUnavailable:
+            continue
+        except delivery_boys.OrderChanged as err:
+            return _after_lost_confirm(order, err)
+    try:
+        item = delivery_boys.write_order(order, status="CONFIRMED", history=[confirmed], now=now, sets=sets, values=values)
+    except delivery_boys.OrderChanged as err:
+        return _after_lost_confirm(order, err)
+    return to_admin_order(item, "none_available")
+
+
+def _after_lost_confirm(order: dict, err: Exception) -> dict:
+    """Someone confirmed (or cancelled) the order between our read and write."""
+    fresh = orders._get_order_item(order["user_id"], order["id"])
+    if fresh["status"] in ("CONFIRMED", "ASSIGNED"):
+        return to_admin_order(fresh, "unchanged")  # double tap / two admins: no second assignment
+    raise _changed(err) from err
+
+
 def change_status(event: dict) -> dict:
     claims = _admin(event)
     body = parse_body(event)
@@ -128,31 +197,24 @@ def change_status(event: dict) -> dict:
     if unknown:
         raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s): {', '.join(unknown)}.")
     new = body.get("status")
-    if new not in (*NEXT_STATUS.values(), "CANCELLED"):
+    if new not in ("CONFIRMED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"):
         raise ApiError(
-            400,
-            "VALIDATION_ERROR",
-            "`status` must be CONFIRMED, PREPARING, OUT_FOR_DELIVERY, DELIVERED or CANCELLED.",
+            400, "VALIDATION_ERROR", "`status` must be CONFIRMED, OUT_FOR_DELIVERY, DELIVERED or CANCELLED."
         )
     order = _find_order(_path_id(event))
     current = order["status"]
     now = _now()
     by = claims.get("email") or claims["sub"]
 
-    names = {"#s": "status"}
-    values: dict[str, Any] = {
-        ":current": current,
-        ":new": new,
-        ":now": now,
-        ":empty": [],
-        ":entry": [orders.history_entry(new, now, by)],
-    }
-    sets = [
-        "#s = :new",
-        "updated_at = :now",
-        "status_history = list_append(if_not_exists(status_history, :empty), :entry)",
-    ]
+    if new == "CONFIRMED":
+        if current in ("CONFIRMED", "ASSIGNED"):
+            return response(200, to_admin_order(order, "unchanged"))
+        if current not in ("PENDING", "PENDING_PAYMENT"):
+            raise ApiError(409, "INVALID_STATUS_CHANGE", f"This order is {current}; it can't be confirmed.")
+        return response(200, _confirm(order, by, now))
 
+    sets: list[str] = []
+    values: dict[str, Any] = {}
     if new == "CANCELLED":
         if current not in KITCHEN_CANCELLABLE:
             raise ApiError(409, "INVALID_STATUS_CHANGE", f"A {current.lower().replace('_', ' ')} order can't be cancelled.")
@@ -165,33 +227,82 @@ def change_status(event: dict) -> dict:
     else:
         if NEXT_STATUS.get(current) != new:
             expected = NEXT_STATUS.get(current)
-            hint = f" The next step is {expected}." if expected else ""
+            if current == "CONFIRMED":
+                hint = " Assign a delivery boy first."
+            else:
+                hint = f" The next step is {expected}." if expected else ""
             raise ApiError(409, "INVALID_STATUS_CHANGE", f"This order is {current}; it can't go to {new}.{hint}")
-        if new == "CONFIRMED":  # from PENDING_PAYMENT: the UPI money is in
-            sets += ["payment_status = :paid", "payment_verified_at = :now", "payment_verified_by = :by"]
-            values.update({":paid": "paid", ":by": by})
         if new == "DELIVERED":
             sets.append("delivered_at = :now")
             if order.get("payment_method") == "cod":
                 sets.append("payment_status = :paid")
                 values[":paid"] = "paid"
-
     try:
-        updated = users.table().update_item(
-            Key={"PK": order["PK"], "SK": order["SK"]},
-            UpdateExpression="SET " + ", ".join(sets),
-            ConditionExpression="#s = :current",
-            ExpressionAttributeNames=names,
-            ExpressionAttributeValues=values,
-            ReturnValues="ALL_NEW",
-        )["Attributes"]
-    except ClientError as err:
-        if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
-            raise
-        raise ApiError(
-            409, "ORDER_CHANGED", "Someone else just updated this order. Pull down to refresh and try again."
-        ) from err
+        updated = delivery_boys.write_order(
+            order, status=new, history=[orders.history_entry(new, now, by)], now=now, sets=sets, values=values
+        )
+    except delivery_boys.OrderChanged as err:
+        raise _changed(err) from err
     return response(200, to_admin_order(updated))
+
+
+def assign_order(event: dict) -> dict:
+    """POST /admin/orders/{id}/assign {delivery_boy_id}: assign or reassign by hand."""
+    claims = _admin(event)
+    body = parse_body(event)
+    unknown = sorted(set(body) - {"delivery_boy_id"})
+    if unknown:
+        raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s): {', '.join(unknown)}.")
+    boy_id = body.get("delivery_boy_id")
+    if not isinstance(boy_id, str) or not boy_id:
+        raise ApiError(400, "VALIDATION_ERROR", "`delivery_boy_id` is required.")
+    order = _find_order(_path_id(event))
+    boy = delivery_boys.get_boy(boy_id)
+    if boy is None:
+        raise ApiError(404, "NOT_FOUND", "Delivery boy not found. They need to open the Deliveries tab once.")
+    if order.get("delivery_boy_id") == boy_id and order["status"] == "ASSIGNED":
+        return response(200, to_admin_order(order, "unchanged"))  # same person again: nothing to do
+    if order["status"] not in ASSIGNABLE:
+        hint = " Confirm it first." if order["status"] in ("PENDING", "PENDING_PAYMENT") else ""
+        raise ApiError(
+            409, "INVALID_STATUS_CHANGE", f"A {order['status'].lower().replace('_', ' ')} order can't be assigned.{hint}"
+        )
+    now = _now()
+    by = claims.get("email") or claims["sub"]
+    try:
+        updated = delivery_boys.write_order(
+            order,
+            status="ASSIGNED",
+            history=[orders.history_entry("ASSIGNED", now, by)],
+            now=now,
+            boy=boy,
+            by=by,
+            expected_boy=order.get("delivery_boy_id"),  # None = nobody yet
+        )
+    except (delivery_boys.OrderChanged, delivery_boys.BoyUnavailable) as err:
+        raise _changed(err) from err
+    return response(200, to_admin_order(updated))
+
+
+def list_delivery_boys(event: dict) -> dict:
+    _admin(event)
+    counts = delivery_boys.active_counts()
+    boys = [delivery_boys.to_boy(b, counts) for b in delivery_boys.all_boys()]
+    boys.sort(key=lambda b: (not b["on_duty"], b["active_orders"], b["name"].lower()))
+    return response(200, boys)
+
+
+def update_delivery_boy(event: dict) -> dict:
+    """PATCH /admin/delivery-boys/{id} {on_duty: false}. Only delivery boys switch themselves on."""
+    _admin(event)
+    body = parse_body(event)
+    if set(body) != {"on_duty"} or body["on_duty"] is not False:
+        raise ApiError(400, "VALIDATION_ERROR", "Send {\"on_duty\": false} to take someone off duty.")
+    boy_id = _path_id(event)
+    if delivery_boys.get_boy(boy_id) is None:
+        raise ApiError(404, "NOT_FOUND", "Delivery boy not found.")
+    item = delivery_boys.set_on_duty(boy_id, False, _now())
+    return response(200, delivery_boys.to_boy(item, delivery_boys.active_counts()))
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +567,9 @@ ROUTES = {
     "PATCH /admin/store": update_store,
     "GET /admin/orders": list_orders,
     "POST /admin/orders/{id}/status": change_status,
+    "POST /admin/orders/{id}/assign": assign_order,
+    "GET /admin/delivery-boys": list_delivery_boys,
+    "PATCH /admin/delivery-boys/{id}": update_delivery_boy,
     "GET /admin/categories": list_categories,
     "POST /admin/categories": create_category,
     "PATCH /admin/categories/{id}": update_category,

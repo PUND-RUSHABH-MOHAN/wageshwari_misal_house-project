@@ -1,6 +1,6 @@
 /**
- * One order on the Kitchen board (admins only): what to cook, who it's for, and the one
- * button that moves it to the next step.
+ * One order on the Kitchen board (admins only): what to cook, who it's for, who delivers it,
+ * and the one button that moves it on (part 7c: Confirm -> auto-assign -> Picked up -> Delivered).
  */
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -13,12 +13,17 @@ import { formatAddress, formatCurrency, formatPhone, SPICE_LABELS } from '@/util
 import { callPhone, openMapAt } from '@/utils/maps';
 import { istClockTime } from '@/utils/pricing';
 
-/** The single forward step the server allows from each status. */
+/**
+ * The single forward step the server allows from each status. CONFIRMED has none: it needs a
+ * delivery boy (Assign). ASSIGNED / OUT_FOR_DELIVERY are normally the delivery boy's taps; the
+ * admin can do them too (e.g. when the owner delivers).
+ */
 export const NEXT_STEP: Partial<Record<OrderStatus, { status: OrderStatus; label: string; icon: IconName }>> = {
+  PENDING: { status: 'CONFIRMED', label: 'Confirm order', icon: 'checkCircle' },
   // UPI: after checking the hotel's UPI app for this amount / order number / UTR.
-  PENDING_PAYMENT: { status: 'CONFIRMED', label: 'Payment received', icon: 'checkCircle' },
-  CONFIRMED: { status: 'PREPARING', label: 'Start preparing', icon: 'flame' },
-  PREPARING: { status: 'OUT_FOR_DELIVERY', label: 'Out for delivery', icon: 'bag' },
+  PENDING_PAYMENT: { status: 'CONFIRMED', label: 'Payment received · Confirm', icon: 'checkCircle' },
+  ASSIGNED: { status: 'OUT_FOR_DELIVERY', label: 'Picked up', icon: 'bag' },
+  PREPARING: { status: 'OUT_FOR_DELIVERY', label: 'Out for delivery', icon: 'bag' }, // before part 7c
   OUT_FOR_DELIVERY: { status: 'DELIVERED', label: 'Mark delivered', icon: 'checkCircle' },
 };
 
@@ -29,17 +34,22 @@ export function KitchenOrderCard({
   busy,
   onNext,
   onCancel,
+  onAssign,
 }: {
   order: AdminOrder;
   /** A status change for this order is in flight. */
   busy: boolean;
   onNext: (status: OrderStatus) => void;
   onCancel: () => void;
+  /** Open the delivery boy picker (assign / reassign). */
+  onAssign: () => void;
 }) {
   const a = order.address_snapshot;
   const next = NEXT_STEP[order.status];
   const done = isKitchenDone(order.status);
   const collectCash = order.payment_method === 'cod' && order.payment_status !== 'paid' && !done;
+  const boy = order.delivery_boy;
+  const canReassign = order.status === 'ASSIGNED' || order.status === 'PREPARING';
 
   return (
     <View style={[styles.card, done && styles.cardDone]}>
@@ -131,6 +141,39 @@ export function KitchenOrderCard({
         </Text>
       </View>
 
+      {/* Who delivers it (part 7c) */}
+      {boy ? (
+        <View style={styles.boy}>
+          <Icon name="delivery" size={20} color={Colors.primaryDark} />
+          <View style={styles.flex}>
+            <Text style={styles.boyName}>{boy.name}</Text>
+            <Text style={styles.meta}>
+              {order.assigned_by === 'auto' ? 'Assigned automatically' : 'Assigned by hand'}
+              {order.assigned_at ? ` · ${istClockTime(order.assigned_at)}` : ''}
+            </Text>
+          </View>
+          {boy.phone ? (
+            <Pressable
+              onPress={() => callPhone(boy.phone)}
+              hitSlop={6}
+              accessibilityLabel={`Call ${boy.name}`}
+              style={styles.roundBtn}>
+              <Icon name="phone" size={18} color={Colors.primary} />
+            </Pressable>
+          ) : null}
+          {canReassign ? (
+            <Pressable onPress={onAssign} hitSlop={8} disabled={busy} accessibilityRole="button">
+              <Text style={styles.link}>Reassign</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : order.status === 'CONFIRMED' || order.status === 'PREPARING' ? (
+        <View style={styles.noBoy}>
+          <Icon name="info" size={18} color={Colors.warning} />
+          <Text style={styles.noBoyText}>No delivery boy yet. Assign someone to send it out.</Text>
+        </View>
+      ) : null}
+
       {order.status === 'CANCELLED' ? (
         <Text style={styles.cancelled}>
           {order.cancelled_by === 'kitchen'
@@ -141,10 +184,14 @@ export function KitchenOrderCard({
 
       {!done ? (
         <View style={styles.actions}>
-          {next ? (
+          {order.status === 'CONFIRMED' || (order.status === 'PREPARING' && !boy) ? (
+            <Button title="Assign delivery boy" icon="delivery" onPress={onAssign} loading={busy} style={styles.flex} />
+          ) : next ? (
             <Button
               title={next.label}
               icon={next.icon}
+              // ASSIGNED: normally the delivery boy taps "Picked up"; this is the admin's fallback.
+              variant={order.status === 'ASSIGNED' ? 'outline' : undefined}
               onPress={() => onNext(next.status)}
               loading={busy}
               style={styles.flex}
@@ -206,4 +253,23 @@ const styles = StyleSheet.create({
   },
   payTitle: { fontSize: 15, fontWeight: '800', color: Colors.warning },
   utr: { fontSize: 16, fontWeight: '800', color: Colors.text, letterSpacing: 1 },
+  boy: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.primarySoft,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+  },
+  boyName: { fontSize: 14, fontWeight: '800', color: Colors.primaryDark },
+  link: { fontSize: 13, fontWeight: '800', color: Colors.primary },
+  noBoy: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.warningSoft,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+  },
+  noBoyText: { flex: 1, fontSize: 13, fontWeight: '700', color: Colors.warning },
 });

@@ -50,6 +50,8 @@ src/
 │       ├── index.tsx         # Home: categories, search, product grid
 │       ├── cart.tsx          # Cart, bill, delivery slot, payment, place order
 │       ├── orders.tsx        # Order history + live status
+│       ├── kitchen.tsx       # Admins: order board, Confirm + assign (hidden for others)
+│       ├── deliveries.tsx    # Delivery boys: on duty, my deliveries (hidden for others)
 │       └── profile.tsx       # Profile + saved addresses
 ├── components/               # Reusable UI (ProductCard, ProductDetailSheet, BottomSheet, …)
 ├── context/AppContext.tsx    # ★ Global state + every action that will become an API call
@@ -103,6 +105,21 @@ set default call the API and then re-read the list, so the server decides which 
 Adding an address needs the phone's GPS position ("Use my current location", `expo-location`); the
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
+
+**Part 7c (delivery boys; backend plan ready, apply pending):** accounts in the Cognito `delivery` group
+(how to add one: `backend/README.md` → "Add a delivery boy") get a **Deliveries** tab:
+- an **On duty** switch (resets at midnight; needs a mobile number on the Account tab),
+- their assigned orders with the customer's name and **Call**, the full address with a **map** button, the
+  items, and how much cash to collect,
+- **Picked up** → **Delivered** buttons (with a confirmation). New assignments appear by themselves (20 s refresh).
+
+In the **Kitchen** tab, new cash orders arrive as **Waiting for hotel** (`PENDING`). **Confirm order**
+(UPI: **Payment received · Confirm**) also assigns an on-duty delivery boy automatically (fewest active
+deliveries first). If nobody is on duty the app says *No delivery boy available* and offers **Assign now**;
+**Assign** / **Reassign** open a list of delivery boys (on duty first, active orders, phone, **Off duty**).
+Tapping Confirm twice changes nothing. Admins can still tap Picked up / Mark delivered themselves.
+Customers see *Delivery boy assigned* with his name and a **Call** button until it's delivered, and can
+cancel only until a delivery boy is assigned.
 
 **Live (Part 7):** direct UPI payments, no payment gateway. At checkout pick **UPI (pay now)**; after
 placing, the **Pay** screen (`src/app/pay/[id].tsx`) shows the amount, the hotel's UPI ID, a **Pay with UPI
@@ -206,7 +223,11 @@ or *Maps SDK for Android* isn't enabled.
 | Orders | `cancelOrder()` | `POST /orders/:id/cancel` | **live** |
 | Pay (UPI) | `submitPayment()` | `POST /orders/:id/payment` `{utr}` | **live** (`src/app/pay/[id].tsx`) |
 | Kitchen (admins) | order board | `GET /admin/orders?date=` | **live** (`src/app/(tabs)/kitchen.tsx`) |
-| Kitchen (admins) | next step / cancel | `POST /admin/orders/:id/status` | **live** |
+| Kitchen (admins) | Confirm (+ auto-assign) / next step / cancel | `POST /admin/orders/:id/status` | **live** |
+| Kitchen (admins) | assign / reassign | `GET /admin/delivery-boys`, `POST /admin/orders/:id/assign` | Part 7c (`AssignSheet.tsx`) |
+| Kitchen (admins) | take a delivery boy off duty | `PATCH /admin/delivery-boys/:id` `{on_duty: false}` | Part 7c (`AssignSheet.tsx`) |
+| Deliveries (delivery boys) | on duty | `GET /delivery/me`, `PATCH /delivery/me` `{on_duty}` | Part 7c (`src/app/(tabs)/deliveries.tsx`) |
+| Deliveries (delivery boys) | my orders / Picked up / Delivered | `GET /delivery/orders`, `POST /delivery/orders/:id/status` | Part 7c |
 | Kitchen (admins) | "Taking online orders" switch | `PATCH /admin/store` `{accepting_orders, message?}` | **live** (`AppContext` → `setAcceptingOrders`) |
 | Manage menu (admins) | lists | `GET /admin/categories`, `GET /admin/products` | **live** (`src/app/admin-menu.tsx`) |
 | Manage menu (admins) | add / edit | `POST`/`PATCH /admin/categories`, `POST`/`PATCH /admin/products` | **live** |
@@ -389,7 +410,7 @@ Response: the created **Order** (see 5.5). Full rules and error codes: `backend/
   },
   "delivery_date": "2026-11-13",
   "slot_label": "Morning 10:00 - 11:00 AM",
-  "status": "CONFIRMED",
+  "status": "PENDING",
   "subtotal": 21000,
   "delivery_fee": 3000,
   "tax": 1050,
@@ -422,9 +443,11 @@ Response: the created **Order** (see 5.5). Full rules and error codes: `backend/
 }
 ```
 
-- `status`: `PENDING_PAYMENT` → `CONFIRMED` → `PREPARING` → `OUT_FOR_DELIVERY` → `DELIVERED`, or `CANCELLED`
-  - New COD orders start at `CONFIRMED`. New online orders start at `PENDING_PAYMENT`.
-  - The customer can cancel only while `PENDING_PAYMENT` or `CONFIRMED`.
+- `status` (Part 7c): `PENDING` / `PENDING_PAYMENT` → `CONFIRMED` → `ASSIGNED` → `OUT_FOR_DELIVERY` → `DELIVERED`, or `CANCELLED`
+  - New COD orders start at `PENDING` (waiting for the hotel). New online orders start at `PENDING_PAYMENT`.
+  - The customer can cancel only while `PENDING`, `PENDING_PAYMENT` or `CONFIRMED` (before a delivery boy is assigned).
+  - `PREPARING` only appears on orders placed before Part 7c.
+  - Once assigned: `"delivery_boy": {"name": "Ramu", "phone": "9123456780"}` (only `name` once delivered).
 - `payment_status`: `"pending"` | `"paid"`
 - `order_number` format: `WMH-YYYYMMDD-NNNN` (running number per day)
 - `address_snapshot` is a **frozen copy** of the address at checkout (a JSON column), so
@@ -475,8 +498,9 @@ and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and 
 | Minimum order | ₹100 of food (before delivery and GST) | `src/utils/pricing.ts`, enforced by `backend/src/orders.py` |
 | Time zone | Slots, "today" and kitchen hours use India time (IST) even if the phone is set to another zone | `src/utils/pricing.ts` |
 | Payment | Cash on delivery, or direct UPI: pay by link/QR, send the UTR, the hotel confirms; unpaid UPI orders cancel after 30 min | `cart.tsx`, `pay/[id].tsx`, enforced by the server |
-| Cancelling | Customers: only while `CONFIRMED` (before the kitchen starts). Kitchen: until delivered, with a reason | `AppContext.tsx` → `isCancellable`, enforced by the server |
-| Order steps (kitchen) | One at a time: Confirmed → Preparing → Out for delivery → Delivered | `KitchenOrderCard.tsx` → `NEXT_STEP`, enforced by the server |
+| Cancelling | Customers: only while Pending / Confirmed (before a delivery boy is assigned) and not after sending a UPI UTR. Kitchen: until delivered, with a reason | `AppContext.tsx` → `isCancellable`, enforced by the server |
+| Order steps | One at a time: Pending → Confirmed (auto-assign) → Assigned → Out for delivery (delivery boy: Picked up) → Delivered | `KitchenOrderCard.tsx` → `NEXT_STEP`, `deliveries.tsx`, enforced by the server |
+| Delivery boys | Only on-duty ones get orders automatically (fewest active first); on duty resets at midnight; a delivery boy sees only his own orders, with phone and address only while delivering | `backend/src/delivery_boys.py`, `delivery.py` |
 | Max quantity per add | 20 | `ProductCard.tsx`, `ProductDetailSheet.tsx` |
 | Cooking note | max 120 characters | `SpiceLevelSheet.tsx` |
 | Service area | Within 3 km (straight line) of the hotel, Chandanzira, Jalna | `src/constants/shop.ts`, enforced by `backend/src/addresses.py` |

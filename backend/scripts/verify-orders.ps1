@@ -123,7 +123,7 @@ try {
   if ($o.Status -eq 201) {
     $order = $o.Body
     Assert "order number is WMH-YYYYMMDD-NNNN" ($order.order_number -match '^WMH-\d{8}-\d{4}$') $order.order_number
-    Assert "status CONFIRMED, payment pending" (($order.status -eq "CONFIRMED") -and ($order.payment_status -eq "pending"))
+    Assert "status PENDING (waits for the hotel), payment pending" (($order.status -eq "PENDING") -and ($order.payment_status -eq "pending"))
     Assert "server bill = menu prices + Rs 30 + 5% GST" ($order.total -eq $expectedTotal) "want $expectedTotal"
     Assert "address snapshot is a copy" ($order.address_snapshot.id -eq $addressId) $order.address_snapshot.line1
 

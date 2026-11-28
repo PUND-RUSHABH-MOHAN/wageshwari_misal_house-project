@@ -46,7 +46,7 @@ def login(event: dict) -> dict:
             "token": tokens["IdToken"],
             "refresh_token": tokens["RefreshToken"],
             "expires_in": tokens["ExpiresIn"],
-            "user": users.to_user(profile, role_from_claims(claims)),
+            "user": users.to_user(profile, role_from_claims(claims), roles_from_claims(claims)),
         },
     )
 
@@ -75,6 +75,5 @@ def refresh(event: dict) -> dict:
     return response(200, body_out)
 
 
-def logout(event: dict) -> dict:
 PYSRC
 }

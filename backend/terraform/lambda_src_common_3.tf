@@ -2,6 +2,16 @@
 
 locals {
   lambda_src_common_3 = <<PYSRC
+        raise ApiError(400, "VALIDATION_ERROR", "`email` is not a valid email address.")
+    return email
+
+
+def validate_phone(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ApiError(400, "VALIDATION_ERROR", "`phone` is required.")
+    phone = value.strip()
+    if not _PHONE_RE.match(phone):
+        raise ApiError(
             400, "VALIDATION_ERROR", "`phone` must be a 10-digit Indian mobile number, without +91."
         )
     return phone
