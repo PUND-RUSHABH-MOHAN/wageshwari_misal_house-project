@@ -2,38 +2,11 @@
 
 locals {
   lambda_src_orders_8 = <<PYSRC
-    store.ensure_open()  # 409 STORE_CLOSED while the hotel has online orders switched off
-
-    slot_id, start_hour = _check_slot(request["delivery_date"], request["slot_label"], now)
-    snapshot = _address_snapshot(claims, request["address_id"])
-
-    order_id = f"ord_{int(now.timestamp() * 1000):013d}{secrets.token_hex(3)}"
-    lines = _price_lines(order_id, request["items"])
-    bill = compute_bill(sum(line["line_total"] for line in lines))
-    minimum = min_order_paise()
-    if bill["subtotal"] < minimum:
-        short = minimum - bill["subtotal"]
-        raise ApiError(
-            422,
-            "BELOW_MINIMUM_ORDER",
-            f"Minimum order is {rupees(minimum)} of food. Add {rupees(short)} more to place this order.",
-        )
-
-    created_at = _iso(now)
-    upi = request["payment_method"] == "online"
-    status = "PENDING_PAYMENT" if upi else "PENDING"
-    order = _to_ddb(
-        {
-            **_key(user_id, f"ORDER#{order_id}"),
-            "entity": "ORDER",
-            "id": order_id,
-            "order_number": _next_order_number(now),
-            "user_id": user_id,
-            "address_snapshot": snapshot,
-            "delivery_date": request["delivery_date"],
-            "slot_label": request["slot_label"],
-            "slot_id": slot_id,
-            "slot_start_hour": start_hour,
+            "placed_at": created_at,
+            "estimated_delivery_at": estimate["estimated_delivery_at"],
+            "original_estimated_delivery_at": estimate["estimated_delivery_at"],
+            "prep_minutes": estimate["prep_minutes"],
+            "travel_minutes": estimate["travel_minutes"],
             "status": status,  # COD: PENDING until the kitchen confirms; UPI: PENDING_PAYMENT until it sees the money
             **bill,
             "payment_method": request["payment_method"],
@@ -43,9 +16,9 @@ locals {
             "items": lines,
             "status_history": [history_entry(status, created_at, "customer")],
             **({"payment_expires_at": _iso(now + payment_window())} if upi else {}),
-            # Index GSI1: the kitchen's "all orders for a delivery date, by slot" (admin.py).
-            "GSI1PK": f"ORDERDATE#{request['delivery_date']}",
-            "GSI1SK": f"{start_hour:02d}#{created_at}#{order_id}",
+            # Index GSI1: the kitchen's "all orders for a day" (admin.py), in the order placed.
+            "GSI1PK": f"ORDERDATE#{today}",
+            "GSI1SK": f"{now_ist.hour:02d}#{created_at}#{order_id}",
         }
     )
     record = {
@@ -69,7 +42,27 @@ locals {
     return response(201, to_order(order))
 
 
-def list_orders(event: dict) -> dict:
-    user_id = jwt_claims(event)["sub"]
+def get_estimate(event: dict) -> dict:
+    """GET /orders/estimate?address_id=: what the cart and dish details show before ordering.
+
+    Without address_id: the user's default address, else a typical distance (`approximate: true`).
+    `can_order` / `closed_reason` say whether an order placed now would be accepted.
+    """
+    claims = jwt_claims(event)
+    address_id = (event.get("queryStringParameters") or {}).get("address_id") or addresses._default_id(claims)
+    distance = None
+    if address_id:
+        try:
+            distance = _address_snapshot(claims, address_id).get("distance_km")
+        except ApiError as err:
+            if err.status == 422:  # outside the delivery area: say so in the cart, not here
+                raise
+            if (event.get("queryStringParameters") or {}).get("address_id"):
+                raise
+    now = _now_utc()
+    out = {k: v for k, v in eta.estimate(now, distance).items() if k != "queue"}
+    out["approximate"] = distance is None
+    status = store.to_store(store.get_settings())
+    if not status["accepting_orders"]:
 PYSRC
 }

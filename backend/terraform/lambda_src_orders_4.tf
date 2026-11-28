@@ -2,12 +2,6 @@
 
 locals {
   lambda_src_orders_4 = <<PYSRC
-            raise ApiError(400, "VALIDATION_ERROR", f"`{where}` must be an object.")
-        unknown = sorted(set(line) - {"product_id", "quantity", "spice_level", "note"})
-        if unknown:
-            raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s) in `{where}`: {', '.join(unknown)}.")
-        product_id = line.get("product_id")
-        if not isinstance(product_id, str) or not _PRODUCT_ID_RE.match(product_id):
             raise ApiError(400, "VALIDATION_ERROR", f"`{where}.product_id` is required.")
         qty = line.get("quantity")
         if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= MAX_QUANTITY:
@@ -39,20 +33,34 @@ def _clean_request(body: dict) -> dict:
     address_id = body.get("address_id")
     if not isinstance(address_id, str) or not address_id:
         raise ApiError(400, "VALIDATION_ERROR", "`address_id` is required.")
-    delivery_date = body.get("delivery_date")
-    if not isinstance(delivery_date, str) or not _DATE_RE.match(delivery_date):
-        raise ApiError(400, "VALIDATION_ERROR", "`delivery_date` must be YYYY-MM-DD.")
-    try:
-        date.fromisoformat(delivery_date)
-    except ValueError as exc:
-        raise ApiError(400, "VALIDATION_ERROR", "`delivery_date` is not a real date.") from exc
-    slot_label = body.get("slot_label")
-    if not isinstance(slot_label, str) or slot_label not in SLOTS_BY_LABEL:
-        raise ApiError(400, "VALIDATION_ERROR", "`slot_label` is not one of our delivery slots.")
+    # `delivery_date` / `slot_label` (sent by app builds from before part 7d) are ignored on purpose:
+    # every order is for today, now, and the server works out the delivery time.
     payment = body.get("payment_method")
     if payment not in PAYMENT_METHODS:
         raise ApiError(400, "VALIDATION_ERROR", "`payment_method` must be cod or online.")
     if payment == "online" and not upi_settings()[0]:
         raise ApiError(
+            400, "PAYMENT_METHOD_UNAVAILABLE", "UPI payment isn't available right now. Please choose Cash on Delivery."
+        )
+    return {
+        "address_id": address_id,
+        "payment_method": payment,
+        "items": _clean_items(body.get("items")),
+    }
+
+
+def _request_hash(request: dict) -> str:
+    return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Business rules
+# ---------------------------------------------------------------------------
+def _address_snapshot(claims: dict, address_id: str) -> dict:
+    if not _ADDRESS_ID_RE.match(address_id):
+        raise ApiError(404, "NOT_FOUND", "Delivery address not found.")
+    item = users.table().get_item(Key=_key(claims["sub"], f"ADDRESS#{address_id}")).get("Item")
+    if item is None:
+        raise ApiError(404, "NOT_FOUND", "Delivery address not found.")
 PYSRC
 }

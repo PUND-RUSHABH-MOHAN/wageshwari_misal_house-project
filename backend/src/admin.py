@@ -10,6 +10,10 @@ Routes
                                                                                  -> AdminOrder
   POST  /admin/orders/{id}/assign       {delivery_boy_id}: assign / reassign by hand (part 7c)
                                                                                  -> AdminOrder
+  PATCH /admin/orders/{id}/eta          {delay_minutes, reason?}: push the delivery estimate later
+                                         (part 7d)                              -> AdminOrder
+  POST  /admin/orders/{id}/refund       {status: refunded | not_needed, reference?}: a cancelled UPI
+                                         order's refund, done by hand (part 7d) -> AdminOrder
   GET   /admin/delivery-boys            everyone in the `delivery` group who has opened the
                                          Deliveries tab, on duty first          -> DeliveryBoy[]
   PATCH /admin/delivery-boys/{id}       {on_duty: false}: take someone off duty  -> DeliveryBoy
@@ -19,8 +23,8 @@ Routes
   GET   /admin/products                 all dishes, hidden ones too             -> AdminProduct[]
   POST  /admin/products                 new dish                                -> 201 AdminProduct
   PATCH /admin/products/{id}            price, names, sold out, hide, ...       -> AdminProduct
-  PATCH /admin/store                    {accepting_orders, message?}: stop / restart online
-                                         orders (part 7b)                       -> AdminStore
+  PATCH /admin/store                    {accepting_orders?, message?, prep_minutes?}: stop / restart
+                                         online orders (7b), base cooking time (7d) -> AdminStore
 
 Order status rules (part 7c)
   PENDING (cash) / PENDING_PAYMENT (UPI) -> CONFIRMED -> ASSIGNED -> OUT_FOR_DELIVERY -> DELIVERED
@@ -33,7 +37,10 @@ Order status rules (part 7c)
   - Admins can also do the delivery boy's steps (Picked up, Delivered) as a fallback. DELIVERED
     marks a cash order as paid. Orders from before part 7c may be PREPARING -> OUT_FOR_DELIVERY.
   - The kitchen may cancel any order that isn't delivered yet; a reason (3-120 chars) is
-    required and shown to the customer.
+    required and shown to the customer. Paid UPI orders (or with a UTR) get refund_status "pending".
+  - Delivery estimate (part 7d, eta.py): Confirm never makes it earlier than now + cooking + travel;
+    Picked up sets it to now + travel; PATCH /admin/orders/{id}/eta adds a delay (5-120 min) with
+    an optional reason.
   - Each change is conditional on the status the admin saw, so two people tapping at once
     can't skip a step (the second gets 409 ORDER_CHANGED).
 
@@ -48,13 +55,15 @@ from __future__ import annotations
 import json
 import re
 import secrets
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 import catalog
 import delivery_boys
+import eta
 import orders
 import store
 import users
@@ -105,6 +114,9 @@ def to_admin_order(item: dict, auto_assign: str | None = None) -> dict:
         }
         out["assigned_at"] = item.get("assigned_at")
         out["assigned_by"] = item.get("assigned_by")
+    for field in ("eta_updated_by", "refunded_at", "refunded_by"):  # who changed what (part 7d)
+        if item.get(field):
+            out[field] = item[field]
     if auto_assign:
         out["auto_assign"] = auto_assign
     return out
@@ -156,6 +168,11 @@ def _confirm(order: dict, by: str, now: str) -> dict:
     if order["status"] == "PENDING_PAYMENT":  # the UPI money is in
         sets += ["payment_status = :paid", "payment_verified_at = :now", "payment_verified_by = :by"]
         values.update({":paid": "paid", ":by": by})
+    # The kitchen starts now: the estimate can't be earlier than now + cooking + travel (part 7d).
+    sets.append("estimated_delivery_at = :eta")
+    values[":eta"] = eta.at_confirm(order, orders._now_utc())
+    if not order.get("original_estimated_delivery_at"):  # orders from before part 7d
+        sets.append("original_estimated_delivery_at = :eta")
     confirmed = orders.history_entry("CONFIRMED", now, by)
     for boy in delivery_boys.candidates()[:3]:  # someone may switch off duty meanwhile: try the next
         try:
@@ -224,6 +241,9 @@ def change_status(event: dict) -> dict:
             raise ApiError(400, "VALIDATION_ERROR", "Give the customer a short reason (3–120 characters).")
         values.update({":reason": reason, ":kitchen": "kitchen"})
         sets += ["cancelled_at = :now", "cancelled_by = :kitchen", "cancel_reason = :reason"]
+        if orders.needs_refund(order):
+            sets.append("refund_status = :refund")
+            values[":refund"] = "pending"
     else:
         if NEXT_STATUS.get(current) != new:
             expected = NEXT_STATUS.get(current)
@@ -232,6 +252,9 @@ def change_status(event: dict) -> dict:
             else:
                 hint = f" The next step is {expected}." if expected else ""
             raise ApiError(409, "INVALID_STATUS_CHANGE", f"This order is {current}; it can't go to {new}.{hint}")
+        if new == "OUT_FOR_DELIVERY":  # picked up: now + travel (part 7d)
+            sets.append("estimated_delivery_at = :eta")
+            values[":eta"] = eta.after_pickup(orders._now_utc(), eta.travel_for(order))
         if new == "DELIVERED":
             sets.append("delivered_at = :now")
             if order.get("payment_method") == "cod":
@@ -281,6 +304,81 @@ def assign_order(event: dict) -> dict:
         )
     except (delivery_boys.OrderChanged, delivery_boys.BoyUnavailable) as err:
         raise _changed(err) from err
+    return response(200, to_admin_order(updated))
+
+
+DELAY_MIN, DELAY_MAX = 5, 120
+REFUND_STATUSES = ("refunded", "not_needed")
+
+
+def _conditional_update(order: dict, sets: list[str], values: dict, condition: str, names: dict) -> dict:
+    try:
+        return users.table().update_item(
+            Key={"PK": order["PK"], "SK": order["SK"]},
+            UpdateExpression="SET " + ", ".join(sets),
+            ConditionExpression=condition,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+            ReturnValues="ALL_NEW",
+        )["Attributes"]
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        raise _changed(err) from err
+
+
+def delay_order(event: dict) -> dict:
+    """PATCH /admin/orders/{id}/eta {delay_minutes, reason?}: push the estimate later (part 7d).
+
+    Adds to the current estimate (or to now, if that has already passed). The customer sees
+    "Delayed" once it is 10+ minutes later than first promised.
+    """
+    claims = _admin(event)
+    body = parse_body(event)
+    unknown = sorted(set(body) - {"delay_minutes", "reason"})
+    if unknown:
+        raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s): {', '.join(unknown)}.")
+    minutes = _int(body, "delay_minutes", DELAY_MIN, DELAY_MAX, f"`delay_minutes` must be {DELAY_MIN}–{DELAY_MAX}.")
+    if minutes is None:
+        raise ApiError(400, "VALIDATION_ERROR", "`delay_minutes` is required.")
+    reason = _text(body, "reason", required=False, max_len=120) or ""
+    order = _find_order(_path_id(event))
+    if order["status"] in ("DELIVERED", "CANCELLED"):
+        raise ApiError(409, "INVALID_STATUS_CHANGE", f"This order is {order['status'].lower()}.")
+    now = orders._now_utc()
+    base = eta.parse(order.get("estimated_delivery_at"))
+    if base is None or base < now:
+        base = now
+    new_eta = eta.iso(eta.round_up(base + timedelta(minutes=minutes)))
+    sets = ["estimated_delivery_at = :eta", "updated_at = :now", "eta_updated_by = :by", "delay_reason = :reason"]
+    values = {":eta": new_eta, ":now": _now(), ":by": claims.get("email") or claims["sub"], ":reason": reason,
+              ":current": order["status"]}
+    if not order.get("original_estimated_delivery_at"):
+        sets.append("original_estimated_delivery_at = :first")
+        values[":first"] = order.get("estimated_delivery_at") or eta.iso(now)
+    updated = _conditional_update(order, sets, values, "#s = :current", {"#s": "status"})
+    return response(200, to_admin_order(updated))
+
+
+def record_refund(event: dict) -> dict:
+    """POST /admin/orders/{id}/refund {status, reference?}: the hotel refunded (or found nothing to
+    refund) a cancelled UPI order. Only an order waiting for a refund can be marked."""
+    claims = _admin(event)
+    body = parse_body(event)
+    unknown = sorted(set(body) - {"status", "reference"})
+    if unknown:
+        raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s): {', '.join(unknown)}.")
+    status = body.get("status")
+    if status not in REFUND_STATUSES:
+        raise ApiError(400, "VALIDATION_ERROR", "`status` must be refunded or not_needed.")
+    reference = _text(body, "reference", required=False, max_len=40) or ""
+    order = _find_order(_path_id(event))
+    if order.get("refund_status") != "pending":
+        raise ApiError(409, "NO_REFUND_PENDING", "This order has no refund waiting.")
+    sets = ["refund_status = :r", "refund_reference = :ref", "refunded_at = :now", "refunded_by = :by", "updated_at = :now"]
+    values = {":r": status, ":ref": reference, ":now": _now(), ":by": claims.get("email") or claims["sub"],
+              ":pending": "pending"}
+    updated = _conditional_update(order, sets, values, "refund_status = :pending", {})
     return response(200, to_admin_order(updated))
 
 
@@ -550,16 +648,25 @@ def to_admin_store(item: dict) -> dict:
 
 
 def update_store(event: dict) -> dict:
+    """{accepting_orders?, message?, prep_minutes?}: at least accepting_orders or prep_minutes."""
     claims = _admin(event)
     body = parse_body(event)
-    unknown = sorted(set(body) - {"accepting_orders", "message"})
+    unknown = sorted(set(body) - {"accepting_orders", "message", "prep_minutes"})
     if unknown:
         raise ApiError(400, "VALIDATION_ERROR", f"Unknown field(s): {', '.join(unknown)}.")
-    accepting = body.get("accepting_orders")
-    if not isinstance(accepting, bool):
-        raise ApiError(400, "VALIDATION_ERROR", "`accepting_orders` must be true or false.")
-    message = _text(body, "message", required=False, max_len=store.MESSAGE_MAX) or ""
-    item = store.set_accepting(accepting, message, claims.get("email") or claims["sub"], _now())
+    changes: dict[str, Any] = {}
+    if "accepting_orders" in body or "prep_minutes" not in body:
+        accepting = body.get("accepting_orders")
+        if not isinstance(accepting, bool):
+            raise ApiError(400, "VALIDATION_ERROR", "`accepting_orders` must be true or false.")
+        changes["accepting_orders"] = accepting
+        changes["message"] = _text(body, "message", required=False, max_len=store.MESSAGE_MAX) or ""
+    if "prep_minutes" in body:
+        changes["prep_minutes"] = _int(
+            body, "prep_minutes", store.PREP_MIN, store.PREP_MAX,
+            f"`prep_minutes` must be a whole number from {store.PREP_MIN} to {store.PREP_MAX}.",
+        )
+    item = store.update(changes, claims.get("email") or claims["sub"], _now())
     return response(200, to_admin_store(item))
 
 
@@ -568,6 +675,8 @@ ROUTES = {
     "GET /admin/orders": list_orders,
     "POST /admin/orders/{id}/status": change_status,
     "POST /admin/orders/{id}/assign": assign_order,
+    "PATCH /admin/orders/{id}/eta": delay_order,
+    "POST /admin/orders/{id}/refund": record_refund,
     "GET /admin/delivery-boys": list_delivery_boys,
     "PATCH /admin/delivery-boys/{id}": update_delivery_boy,
     "GET /admin/categories": list_categories,

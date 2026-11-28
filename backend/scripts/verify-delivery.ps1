@@ -3,9 +3,10 @@
   Checks the deployed delivery flow (Part 7c): confirm -> auto-assign -> delivery boy's tab ->
   Picked up, with an admin account and a delivery-boy account (Cognito groups `admin` and
   `delivery`; one person can be both).
-  It places ONE real cash order for tomorrow from the admin account, confirms it, makes sure it
-  is with the test delivery boy (reassigning if another boy got it), marks it Picked up, and then
-  cancels it from the kitchen with the reason "Verify script test". The delivery boy's duty
+  It places ONE real cash order (today, now) from the admin account, confirms it, makes sure it
+  is with the test delivery boy (reassigning if another boy got it), marks it Picked up (after
+  which the customer can no longer cancel, part 7d), and then cancels it from the kitchen with
+  the reason "Verify script test". Orders are only taken 9:00 AM - 8:30 PM India time. The delivery boy's duty
   status is put back the way it was. A temporary address is created and deleted if needed.
   Works in Windows PowerShell 5.1 and PowerShell 7.
 
@@ -75,7 +76,11 @@ function Add-Group([string] $Who, [string] $Group) {
 }
 
 $istNow = [DateTime]::UtcNow.AddHours(5.5)
-$tomorrow = $istNow.AddDays(1).ToString("yyyy-MM-dd")
+$minutesNow = $istNow.Hour * 60 + $istNow.Minute
+if (($minutesNow -lt 9 * 60) -or ($minutesNow -gt 20 * 60 + 30)) {
+  Write-Host "Orders are only taken 9:00 AM - 8:30 PM India time (now $($istNow.ToString('HH:mm'))). Run this again then." -ForegroundColor Yellow
+  exit 0
+}
 
 $admin = Login $Email
 if ($admin.user.role -ne "admin") { Add-Group $Email "admin" }
@@ -111,7 +116,7 @@ try {
   $boys = Invoke-Api GET "/admin/delivery-boys" -Token $t
   Assert "admin sees him on duty" (@($boys.Body | Where-Object { $_.id -eq $boyId -and $_.on_duty }).Count -eq 1)
 
-  Write-Host "`n--- One real order (tomorrow, then cancelled) ---"
+  Write-Host "`n--- One real order (today, then cancelled) ---"
   $list = Invoke-Api GET "/addresses" -Token $t
   if (@($list.Body).Count -lt 5) {
     $r = Invoke-Api POST "/addresses" @{
@@ -128,7 +133,7 @@ try {
   $item = $menu | Sort-Object price | Select-Object -Last 1
   $qty = [int] [Math]::Max(1, [Math]::Ceiling(10000 / $item.price))
   $o = Invoke-Api POST "/orders" @{
-    address_id = $addressId; delivery_date = $tomorrow; slot_label = "Afternoon 12:00 - 1:00 PM"; payment_method = "cod"
+    address_id = $addressId; payment_method = "cod"
     items = @(@{ product_id = $item.id; quantity = $qty })
   } -Token $t -Key ("verify-" + [Guid]::NewGuid().ToString("N"))
   Check "place a cash order" $o 201 -Extra "$($o.Body.order_number) $($o.Body.status)"
@@ -154,12 +159,14 @@ try {
   $job = @($jobs.Body | Where-Object { $_.id -eq $orderId }) | Select-Object -First 1
   Check "GET /delivery/orders" $jobs 200 -Extra "$(@($jobs.Body).Count) order(s)"
   Assert "he sees customer, phone, address, cash" (($job.customer.phone) -and ($job.address.line1) -and ($job.address.state -eq "Maharashtra") -and ($job.collect_cash -eq $o.Body.total))
+  Assert "he sees the estimated delivery time" ([bool] $job.estimated_delivery_at) "$($job.estimated_delivery_at)"
   $mine = Invoke-Api GET "/orders/$orderId" -Token $t
   Assert "customer sees the delivery boy" ($mine.Body.delivery_boy.name -and $mine.Body.delivery_boy.phone) "$($mine.Body.delivery_boy.name)"
-  Check "customer can't cancel once assigned" (Invoke-Api POST "/orders/$orderId/cancel" -Token $t) 409 "ORDER_NOT_CANCELLABLE"
   Check "can't skip Picked up" (Invoke-Api POST "/delivery/orders/$orderId/status" @{ status = "DELIVERED" } -Token $bt) 409 "INVALID_STATUS_CHANGE"
   $up = Invoke-Api POST "/delivery/orders/$orderId/status" @{ status = "OUT_FOR_DELIVERY" } -Token $bt
   Check "delivery boy: Picked up" $up 200 -Extra $up.Body.status
+  # Part 7d: customers can cancel until this moment, not after.
+  Check "customer can't cancel once out for delivery" (Invoke-Api POST "/orders/$orderId/cancel" -Token $t) 409 "ORDER_NOT_CANCELLABLE"
   Check "Picked up twice is harmless" (Invoke-Api POST "/delivery/orders/$orderId/status" @{ status = "OUT_FOR_DELIVERY" } -Token $bt) 200
 
   Write-Host "`n--- Clean up ---"

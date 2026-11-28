@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -12,6 +12,7 @@ from test_orders import (  # noqa: F401 - clock and env are pytest fixtures used
     EARLY,
     IST,
     MORNING,
+    TEN_AM,
     TOMORROW,
     clock,
     env,
@@ -67,27 +68,28 @@ def test_group_claim_as_list_works(env):
 
 
 # ---------------------------------------------------------------- order board
-def test_list_orders_for_a_day_by_slot(env):
+def test_list_orders_for_a_day_in_order_placed(env):
     a = make_address(ALICE)
     b = make_address(BOB)
-    _, morning, _ = place(a, ALICE, key="board-key-1", slot_label=MORNING)
-    _, early, _ = place(b, BOB, key="board-key-2", slot_label=EARLY)
-    _, tomorrow, _ = place(a, ALICE, key="board-key-3", delivery_date=TOMORROW)
+    _, first, _ = place(a, ALICE, key="board-key-1")
+    env["clock"]["now"] = TEN_AM + timedelta(minutes=5)
+    _, second, _ = place(b, BOB, key="board-key-2")
     status, board, _ = adm("GET /admin/orders")  # default = today in IST
     assert status == 200
-    assert [o["id"] for o in board] == [early["id"], morning["id"]]  # the 9 AM slot first
+    assert [o["id"] for o in board] == [first["id"], second["id"]]
     assert board[0]["address_snapshot"]["receiver_phone"] == "9876543210"
     assert board[0]["status_history"][0]["status"] == "PENDING"  # cash orders wait for the kitchen
+    assert board[0]["estimated_delivery_at"] and board[0]["prep_minutes"] == 20
     _, next_day, _ = adm("GET /admin/orders", query={"date": TOMORROW})
-    assert [o["id"] for o in next_day] == [tomorrow["id"]]
+    assert next_day == []
 
 
 def test_default_day_follows_ist(env):
-    new_order(delivery_date=TOMORROW)
-    # 18:40 UTC on the 13th is already 00:10 on the 14th in India
-    env["clock"]["now"] = datetime(2026, 11, 14, 0, 10, tzinfo=IST)
+    # 03:40 UTC on the 14th is 09:10 on the 14th in India
+    env["clock"]["now"] = datetime(2026, 11, 14, 9, 10, tzinfo=IST)
+    new_order()
     _, board, _ = adm("GET /admin/orders")
-    assert len(board) == 1
+    assert len(board) == 1 and board[0]["delivery_date"] == TOMORROW
 
 
 @pytest.mark.parametrize("day", ["13-11-2026", "2026-02-30"])

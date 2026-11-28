@@ -12,6 +12,8 @@ import { isTerminalStatus, useApp } from '@/context/AppContext';
 import { errorMessage } from '@/services/api';
 import type { ID, Order } from '@/types';
 import { formatCurrency } from '@/utils/format';
+import { hasLiveEstimate } from '@/utils/eta';
+import { istClockTime } from '@/utils/pricing';
 
 export default function OrdersScreen() {
   const { orders, ordersStatus, ordersError, reloadOrders, lastPlacedOrderId, dismissOrderBanner, cancelOrder } =
@@ -27,24 +29,39 @@ export default function OrdersScreen() {
     setRefreshing(false);
   };
 
+  // Part 7d: cancel until the order is out for delivery. The server decides; a "Picked up" that
+  // lands first wins and the answer explains why it can't be cancelled any more.
   const confirmCancel = (order: Order) => {
-    Alert.alert('Cancel this order?', `${order.order_number} · ${formatCurrency(order.total)}`, [
-      { text: 'Keep order', style: 'cancel' },
-      {
-        text: 'Cancel order',
-        style: 'destructive',
-        onPress: async () => {
-          setCancellingId(order.id);
-          try {
-            await cancelOrder(order.id); // POST /orders/:id/cancel
-          } catch (e) {
-            Alert.alert("Couldn't cancel", errorMessage(e));
-          } finally {
-            setCancellingId(null);
-          }
+    const paidUpi = order.payment_method === 'online' && (order.payment_status !== 'pending' || Boolean(order.utr));
+    Alert.alert(
+      'Are you sure you want to cancel this order?',
+      `${order.order_number} · ${formatCurrency(order.total)}${
+        paidUpi ? '\n\nYour UPI payment will be refunded by the hotel.' : ''
+      }`,
+      [
+        { text: 'Keep Order', style: 'cancel' },
+        {
+          text: 'Cancel Order',
+          style: 'destructive',
+          onPress: async () => {
+            setCancellingId(order.id);
+            try {
+              const cancelled = await cancelOrder(order.id); // POST /orders/:id/cancel
+              Alert.alert(
+                'Order cancelled',
+                cancelled.refund_status === 'pending'
+                  ? `${cancelled.order_number} has been cancelled. The hotel will refund your UPI payment to the same account, usually the same day.`
+                  : `${cancelled.order_number} has been cancelled.`,
+              );
+            } catch (e) {
+              Alert.alert("Couldn't cancel", errorMessage(e));
+            } finally {
+              setCancellingId(null);
+            }
+          },
         },
-      },
-    ]);
+      ],
+    );
   };
 
   const firstLoad = orders.length === 0 && (ordersStatus === 'loading' || ordersStatus === 'idle');
@@ -81,6 +98,11 @@ export default function OrdersScreen() {
               {placed.order_number} · {formatCurrency(placed.total)} ·{' '}
               {placed.payment_method === 'cod' ? 'Cash on Delivery' : 'UPI'}
             </Text>
+            {hasLiveEstimate(placed) ? (
+              <Text style={styles.bannerEta}>
+                Estimated delivery {istClockTime(placed.estimated_delivery_at!)} (estimate)
+              </Text>
+            ) : null}
           </View>
           <Pressable onPress={dismissOrderBanner} hitSlop={10} accessibilityLabel="Dismiss">
             <Icon name="close" size={18} color={Colors.white} />
@@ -148,6 +170,7 @@ const styles = StyleSheet.create({
   },
   bannerTitle: { color: Colors.white, fontSize: 15, fontWeight: '800' },
   bannerText: { color: '#E8F5E9', fontSize: 12, marginTop: 2 },
+  bannerEta: { color: Colors.white, fontSize: 13, fontWeight: '800', marginTop: 4 },
   list: { padding: Spacing.lg, paddingBottom: Spacing.xxl },
   separator: { height: Spacing.md },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: Spacing.md, padding: Spacing.xl },

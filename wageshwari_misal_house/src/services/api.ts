@@ -14,6 +14,7 @@ import type {
   AdminProduct,
   AdminStore,
   DeliveryBoy,
+  DeliveryEstimate,
   DeliveryOrder,
   Category,
   Order,
@@ -220,6 +221,17 @@ export const orderApi = {
    */
   create: (token: string, body: PlaceOrderBody, idempotencyKey: string) =>
     request<Order>('POST', '/orders', { token, body, headers: { 'Idempotency-Key': idempotencyKey } }),
+  /**
+   * Part 7d: delivery time for an order placed now. `addressId` = the chosen address; without it the
+   * server uses the default address, or a typical distance (`approximate: true`).
+   */
+  estimate: (token: string, addressId?: string) =>
+    request<DeliveryEstimate>(
+      'GET',
+      addressId ? `/orders/estimate?address_id=${encodeURIComponent(addressId)}` : '/orders/estimate',
+      { token },
+    ),
+  /** Allowed until the order is out for delivery (409 ORDER_NOT_CANCELLABLE after). Repeats are harmless. */
   cancel: (token: string, id: string) =>
     request<Order>('POST', `/orders/${encodeURIComponent(id)}/cancel`, { token }),
   /** "I've paid by UPI": the 12-digit UTR / UPI reference number. */
@@ -248,7 +260,7 @@ export type ProductInput = Partial<
 >;
 
 export const adminApi = {
-  /** Orders for one delivery day (YYYY-MM-DD, IST), by slot then time. */
+  /** Orders for one delivery day (YYYY-MM-DD, IST), in the order placed. */
   orders: (token: string, date: string) =>
     request<AdminOrder[]>('GET', `/admin/orders?date=${encodeURIComponent(date)}`, { token }),
   /**
@@ -288,6 +300,24 @@ export const adminApi = {
     request<AdminStore>('PATCH', '/admin/store', {
       token,
       body: message ? { accepting_orders, message } : { accepting_orders },
+    }),
+  /** Part 7d: the base cooking time (5–90 min) used for every new estimate. */
+  setPrepMinutes: (token: string, prep_minutes: number) =>
+    request<AdminStore>('PATCH', '/admin/store', { token, body: { prep_minutes } }),
+  /** Part 7d: push an order's estimated delivery time later by 5–120 minutes. */
+  delay: (token: string, id: string, delay_minutes: number, reason?: string) =>
+    request<AdminOrder>('PATCH', `/admin/orders/${encodeURIComponent(id)}/eta`, {
+      token,
+      body: reason ? { delay_minutes, reason } : { delay_minutes },
+    }),
+  /**
+   * Part 7d: a cancelled UPI order's refund, done by hand in the hotel's UPI app. `refunded` only after
+   * the money has actually gone back; `not_needed` when no payment arrived.
+   */
+  recordRefund: (token: string, id: string, status: 'refunded' | 'not_needed', reference?: string) =>
+    request<AdminOrder>('POST', `/admin/orders/${encodeURIComponent(id)}/refund`, {
+      token,
+      body: reference ? { status, reference } : { status },
     }),
 };
 

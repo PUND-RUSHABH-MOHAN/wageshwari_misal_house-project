@@ -2,8 +2,8 @@
 
 A food-ordering app for **Wagheshwar Misal House**, A/P Chandanzira, Jalna – Chh. Sambhajinagar
 Highway, Jalna 431203 (address in `src/constants/shop.ts`). Customers browse the menu
-(Misal, Thali, Vada Pav, Chaha), pick a spice level, choose a delivery slot and
-place orders (Cash on Delivery or direct UPI).
+(Misal, Thali, Vada Pav, Chaha), pick a spice level and place orders for delivery now (Cash on
+Delivery or direct UPI); the app shows an estimated delivery time worked out by the server.
 
 > **Current status:** connected to the AWS backend (`../backend/`). Sign-up / login, the menu,
 > saved addresses, orders, UPI payments and the kitchen/admin screens all use the live API.
@@ -48,7 +48,7 @@ src/
 │   └── (tabs)/
 │       ├── _layout.tsx       # Bottom tab bar
 │       ├── index.tsx         # Home: categories, search, product grid
-│       ├── cart.tsx          # Cart, bill, delivery slot, payment, place order
+│       ├── cart.tsx          # Cart, bill, delivery estimate, payment, place order
 │       ├── orders.tsx        # Order history + live status
 │       ├── kitchen.tsx       # Admins: order board, Confirm + assign (hidden for others)
 │       ├── deliveries.tsx    # Delivery boys: on duty, my deliveries (hidden for others)
@@ -57,7 +57,9 @@ src/
 ├── context/AppContext.tsx    # ★ Global state + every action that will become an API call
 ├── data/mock-data.ts         # Bundled images: logo, login background, fallback food photos
 ├── types/index.ts            # ★ Data models = the JSON contract with the backend
-├── utils/pricing.ts          # Bill calculation, delivery fee, GST, delivery slots, kitchen hours
+├── utils/pricing.ts          # Bill calculation, delivery fee, GST, ordering hours, IST helpers
+├── utils/eta.ts              # Delivery-estimate, delay and refund wording (part 7d)
+├── hooks/useDeliveryEstimate.ts # GET /orders/estimate for the cart and dish details (part 7d)
 ├── utils/format.ts           # Currency (paise → ₹), dates, spice labels, validators
 └── constants/theme.ts        # Brand colours, fonts, spacing
 assets/images/                # Logo, app icons, food photos
@@ -106,7 +108,28 @@ Adding an address needs the phone's GPS position ("Use my current location", `ex
 form previews the distance from the hotel and the server refuses anything beyond 3 km. Pincode and
 area are pre-filled from the position when empty. Delete asks for confirmation.
 
-**Live (Part 7c, backend deployed 2026-11-28; needs this app build):** delivery boys. Accounts in the Cognito `delivery` group
+**Live (Part 7d, backend deployed 2026-11-28; needs this app build):** automatic delivery time and
+cancel until out for delivery.
+- **No date or slot to pick.** Every order is for today, now. The **Cart** shows *Estimated delivery 1:35 PM ·
+  about 35 min from now · 20 min cooking + 12 min on the road*, labelled as an estimate; dish details show
+  *Delivered in about 35 min if you order now*. Both come from `GET /orders/estimate` (refreshed every minute and
+  when the address changes). Orders are taken **9:00 AM – 8:30 PM**; outside that the cart shows *The kitchen is
+  closed now* and Place order is disabled (the server answers `KITCHEN_CLOSED`).
+- The **order-placed** banner, order history and tracking show the estimate (*Arriving 1:35 PM · about 12 min*).
+  If the kitchen pushes it 10+ minutes past the first promise, the order shows **delayed** and a *Running about
+  15 min late* notice with the kitchen's reason (in-app; push notifications later).
+- **Cancel** is offered until the order is out for delivery: *Are you sure you want to cancel this order?* with
+  **Cancel Order** / **Keep Order**, then *Order cancelled*. If the delivery boy picks it up first, the server
+  refuses and the app shows why. Paid UPI orders show *Refund pending* until the hotel records the refund.
+- **Kitchen**: orders soonest-estimate first, each with *Deliver by 1:35 PM · 12 min left* (red when late) and a
+  **Delay** button (+10 … +60 min, optional reason for the customer). A **Cooking time** row sets the base minutes
+  for new estimates. Cancelled UPI orders that were paid wait under **Refunds to do**: refund from the hotel's
+  UPI app, then tap **Refund sent** (with the refund UTR) or **No payment arrived**. Cancelled orders show who
+  cancelled and when.
+- **Deliveries**: each order shows *Deliver by …*, soonest first. If one of his orders is cancelled, the next
+  refresh pops up *Order cancelled … don't deliver*.
+
+**Live (Part 7c, backend deployed 2026-11-28):** delivery boys. Accounts in the Cognito `delivery` group
 (how to add one: `backend/README.md` → "Add a delivery boy") get a **Deliveries** tab:
 - an **On duty** switch (resets at midnight; needs a mobile number on the Account tab),
 - their assigned orders with the customer's name and **Call**, the full address with a **map** button, the
@@ -119,7 +142,7 @@ deliveries first). If nobody is on duty the app says *No delivery boy available*
 **Assign** / **Reassign** open a list of delivery boys (on duty first, active orders, phone, **Off duty**).
 Tapping Confirm twice changes nothing. Admins can still tap Picked up / Mark delivered themselves.
 Customers see *Delivery boy assigned* with his name and a **Call** button until it's delivered, and can
-cancel only until a delivery boy is assigned.
+cancel until it's out for delivery (Part 7d).
 
 **Live (Part 7):** direct UPI payments, no payment gateway. At checkout pick **UPI (pay now)**; after
 placing, the **Pay** screen (`src/app/pay/[id].tsx`) shows the amount, the hotel's UPI ID, a **Pay with UPI
@@ -127,12 +150,12 @@ app** button (opens GPay / PhonePe / Paytm via the server's `upi://pay` link) an
 (`react-native-qrcode-svg` + `react-native-svg`) for paying from another phone. After paying, the customer
 types the **12-digit UTR** and taps *I've paid*; the hotel checks its UPI app and taps **Payment received** on the
 Kitchen tab, and the order continues as usual. Unpaid orders (no UTR) are cancelled after 30 minutes. On the
-Orders tab an unpaid UPI order has a **Pay now** button. Customers can't cancel once they've sent a UTR
-(refund through the hotel). Nothing confirms payments automatically: there's no gateway.
+Orders tab an unpaid UPI order has a **Pay now** button. Since Part 7d customers can cancel after paying too;
+the hotel then refunds by hand and records it. Nothing confirms payments or refunds automatically: there's no gateway.
 
 **Live (Part 6):** kitchen and menu admin, for accounts in the Cognito `admin` group (how to add one:
 `backend/README.md` → "Make someone an admin"; then log out and in). Admins get:
-- a **Kitchen** tab (hidden for customers): today's or tomorrow's orders grouped by delivery slot, with
+- a **Kitchen** tab (hidden for customers): today's orders (soonest estimated delivery first since Part 7d), with
   what to cook (quantities, spice, notes), the receiver's name, a call button and a map button. One button
   per order moves it on: *Start preparing → Out for delivery → Mark delivered*. **Cancel** asks for a short
   reason that the customer sees. Counts at the top; re-checks every 20 s while open; pull down to refresh.
@@ -145,7 +168,7 @@ Customers see the new statuses through the Orders tab's polling, and a kitchen c
 re-checks every 20 seconds while an order is in progress and the app is open. **Place Order** sends
 the cart to `POST /orders` with an `Idempotency-Key` header: if the network drops and you tap again
 with the same cart, the server returns the first order instead of making a second one. The server
-re-checks everything (prices from the menu, slot, address, stock) and its message is shown above the
+re-checks everything (prices from the menu, ordering hours, address, stock) and its message is shown above the
 button if it refuses; if a dish has sold out, the menu reloads and the cart marks it **Sold out**.
 Cancel asks for confirmation and calls `POST /orders/:id/cancel`. Cash on delivery only for now
 ("UPI / Online" shows as coming soon). Minimum order ₹100 of food: below that the cart says how much
@@ -220,7 +243,11 @@ or *Maps SDK for Android* isn't enabled.
 | Cart | `placeOrder()` | `POST /orders` (+ `Idempotency-Key` header) | **live** |
 | Orders | order history | `GET /orders` | **live** (`AppContext` → `loadOrders`) |
 | Orders | live status | `GET /orders` every 20 s while an order is in progress | **live** (polling) |
-| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | **live** |
+| Orders | `cancelOrder()` | `POST /orders/:id/cancel` | **live** (until out for delivery, Part 7d) |
+| Cart / dish details | delivery estimate | `GET /orders/estimate?address_id=` | **live** (`hooks/useDeliveryEstimate.ts`) |
+| Kitchen (admins) | Delay | `PATCH /admin/orders/:id/eta` `{delay_minutes, reason?}` | **live** (`KitchenTimeSheets.tsx`) |
+| Kitchen (admins) | Refund sent / No payment arrived | `POST /admin/orders/:id/refund` `{status, reference?}` | **live** (`KitchenTimeSheets.tsx`) |
+| Kitchen (admins) | Cooking time | `PATCH /admin/store` `{prep_minutes}` | **live** (`AppContext` → `setPrepMinutes`) |
 | Pay (UPI) | `submitPayment()` | `POST /orders/:id/payment` `{utr}` | **live** (`src/app/pay/[id].tsx`) |
 | Kitchen (admins) | order board | `GET /admin/orders?date=` | **live** (`src/app/(tabs)/kitchen.tsx`) |
 | Kitchen (admins) | Confirm (+ auto-assign) / next step / cancel | `POST /admin/orders/:id/status` | **live** |
@@ -356,15 +383,13 @@ the same rules and treat its own result as final:
 | `tax` | **5% GST** on subtotal, rounded to the nearest paise |
 | `total` | `subtotal + delivery_fee + tax` |
 
-**`POST /orders`** request. The first four fields are the app's `PlaceOrderInput`
-type. The `items` array is built from the cart, and the backend needs it because the
+**`POST /orders`** request. The first two fields are the app's `PlaceOrderInput`
+type (Part 7d: no `delivery_date` / `slot_label`; the server ignores them if an old build sends them). The `items` array is built from the cart, and the backend needs it because the
 cart lives on the device:
 
 ```json
 {
   "address_id": "adr_01",
-  "delivery_date": "2026-11-13",
-  "slot_label": "Morning 10:00 - 11:00 AM",
   "payment_method": "cod",
   "items": [
     { "product_id": "prd_misal_pav", "quantity": 2, "spice_level": "teekha", "note": "Less onion" },
@@ -377,10 +402,26 @@ cart lives on the device:
 - `payment_method`: `"cod"` | `"online"` (= direct UPI: the order starts `PENDING_PAYMENT` with `upi_payment`)
 - `spice_level`: `"mild"` | `"medium"` | `"teekha"`. Only for products with `has_spice_level: true`.
 - `note`: optional, max 120 characters
-- `delivery_date`: today or tomorrow in India time; `slot_label` exactly as `slotLabel()` builds it.
+- Orders are for today, now, 9:00 AM – 8:30 PM IST (else `409 KITCHEN_CLOSED`). The server works out the delivery time.
 - Prices are **not** sent; the server takes them from the menu. Food subtotal must be at least ₹100.
 
 Response: the created **Order** (see 5.5). Full rules and error codes: `backend/README.md`.
+
+**`GET /orders/estimate?address_id=adr_01`** (Part 7d), before ordering:
+
+```json
+{
+  "prep_minutes": 20,
+  "travel_minutes": 12,
+  "total_minutes": 35,
+  "estimated_delivery_at": "2026-11-13T05:05:00.000Z",
+  "approximate": false,
+  "can_order": true
+}
+```
+
+Without `address_id` the default address is used, or a typical distance (`approximate: true`).
+`can_order: false` comes with `closed_reason` (outside hours, or online orders switched off).
 
 ### 5.5 Orders screen
 
@@ -409,15 +450,19 @@ Response: the created **Order** (see 5.5). Full rules and error codes: `backend/
     "is_default": true
   },
   "delivery_date": "2026-11-13",
-  "slot_label": "Morning 10:00 - 11:00 AM",
   "status": "PENDING",
+  "placed_at": "2026-11-13T04:30:00.000Z",
+  "estimated_delivery_at": "2026-11-13T05:05:00.000Z",
+  "original_estimated_delivery_at": "2026-11-13T05:05:00.000Z",
+  "prep_minutes": 20,
+  "travel_minutes": 12,
   "subtotal": 21000,
   "delivery_fee": 3000,
   "tax": 1050,
   "total": 25050,
   "payment_method": "cod",
   "payment_status": "pending",
-  "created_at": "2026-11-12T18:30:00.000Z",
+  "created_at": "2026-11-13T04:30:00.000Z",
   "items": [
     {
       "id": "oit_01",
@@ -445,10 +490,16 @@ Response: the created **Order** (see 5.5). Full rules and error codes: `backend/
 
 - `status` (Part 7c): `PENDING` / `PENDING_PAYMENT` → `CONFIRMED` → `ASSIGNED` → `OUT_FOR_DELIVERY` → `DELIVERED`, or `CANCELLED`
   - New COD orders start at `PENDING` (waiting for the hotel). New online orders start at `PENDING_PAYMENT`.
-  - The customer can cancel only while `PENDING`, `PENDING_PAYMENT` or `CONFIRMED` (before a delivery boy is assigned).
+  - The customer can cancel until `OUT_FOR_DELIVERY` (Part 7d): `PENDING`, `PENDING_PAYMENT`, `CONFIRMED`, `ASSIGNED`
+    (and old `PREPARING`). Cancelled orders carry `cancelled_at` and `cancelled_by`.
   - `PREPARING` only appears on orders placed before Part 7c.
   - Once assigned: `"delivery_boy": {"name": "Ramu", "phone": "9123456780"}` (only `name` once delivered).
-- `payment_status`: `"pending"` | `"paid"`
+- `payment_status`: `"pending"` | `"submitted"` (UPI, UTR sent) | `"paid"`
+- Delivery time (Part 7d): `estimated_delivery_at` (current estimate), `original_estimated_delivery_at` (first
+  promise), `delay_minutes` and `delayed` (10+ min late, not finished), `delay_reason`. Orders from before Part 7d
+  have `slot_label` instead.
+- Refunds (Part 7d, cancelled UPI orders that were paid): `refund_status` `"pending"` → `"refunded"` (with
+  `refund_reference`) or `"not_needed"`.
 - `order_number` format: `WMH-YYYYMMDD-NNNN` (running number per day)
 - `address_snapshot` is a **frozen copy** of the address at checkout (a JSON column), so
   later address edits don't change past orders.
@@ -490,15 +541,16 @@ and return the saved `Address`, which adds `id`, `user_id`, `city: "Jalna"` and 
 
 | Rule | Value | File |
 |---|---|---|
-| Delivery hours | 9:00 AM – 9:00 PM (shows OPEN / CLOSED; outside these hours orders are pre-orders) | `src/utils/pricing.ts`, `src/constants/shop.ts` |
-| Delivery slots | 12 one-hour slots: Morning 9–10, 10–11, 11–12 · Afternoon 12–1 … 4–5 · Evening 5–6 … 8–9. Labels must match `SLOTS` in `backend/src/orders.py` exactly | `src/utils/pricing.ts` |
-| Online orders switch | Admins can stop all new orders (today and tomorrow) from the Kitchen tab, with an optional message. Stays off until an admin turns it back on. Home and Cart show a red banner and Place Order is disabled; the server refuses with `409 STORE_CLOSED` | `kitchen.tsx`, `StopOrdersSheet.tsx`, enforced by `backend/src/store.py` |
-| Same-day slot cut-off | A slot closes 30 minutes before it starts | `src/utils/pricing.ts` |
+| Ordering hours | 9:00 AM – 8:30 PM IST (Home shows OPEN / CLOSED; no pre-orders). Delivery until 9 PM | `src/utils/pricing.ts` → `isOrderingOpen`, enforced by `backend/src/store.py` |
+| Delivery time | Server estimate only: cooking (Kitchen setting, default 20 min) + 2 min per waiting order (max +30) + travel (5 min + 4 min/km), rounded up to 5 min. Always shown as an estimate | `backend/src/eta.py`; shown via `src/utils/eta.ts` |
+| Delays | Kitchen pushes the estimate 5–120 min later; customers see *delayed* from 10 min past the first promise | `KitchenTimeSheets.tsx`, `backend/src/admin.py` |
+| Online orders switch | Admins can stop all new orders from the Kitchen tab, with an optional message. Stays off until an admin turns it back on. Home and Cart show a red banner and Place Order is disabled; the server refuses with `409 STORE_CLOSED` | `kitchen.tsx`, `StopOrdersSheet.tsx`, enforced by `backend/src/store.py` |
 | Delivery fee / GST | ₹30 flat / 5% | `src/utils/pricing.ts` |
 | Minimum order | ₹100 of food (before delivery and GST) | `src/utils/pricing.ts`, enforced by `backend/src/orders.py` |
-| Time zone | Slots, "today" and kitchen hours use India time (IST) even if the phone is set to another zone | `src/utils/pricing.ts` |
+| Time zone | "Today", ordering hours and all delivery times use India time (IST) even if the phone is set to another zone | `src/utils/pricing.ts` |
 | Payment | Cash on delivery, or direct UPI: pay by link/QR, send the UTR, the hotel confirms; unpaid UPI orders cancel after 30 min | `cart.tsx`, `pay/[id].tsx`, enforced by the server |
-| Cancelling | Customers: only while Pending / Confirmed (before a delivery boy is assigned) and not after sending a UPI UTR. Kitchen: until delivered, with a reason | `AppContext.tsx` → `isCancellable`, enforced by the server |
+| Cancelling | Customers: until the order is out for delivery (confirmation popup; paid UPI orders → refund pending). Kitchen: until delivered, with a reason | `AppContext.tsx` → `isCancellable`, enforced by the server |
+| Refunds | By hand from the hotel's UPI app; the kitchen records *Refund sent* only after the money has gone back, or *No payment arrived*. Cash orders need none | `KitchenTimeSheets.tsx` → `RefundSheet`, `backend/src/admin.py` |
 | Order steps | One at a time: Pending → Confirmed (auto-assign) → Assigned → Out for delivery (delivery boy: Picked up) → Delivered | `KitchenOrderCard.tsx` → `NEXT_STEP`, `deliveries.tsx`, enforced by the server |
 | Delivery boys | Only on-duty ones get orders automatically (fewest active first); on duty resets at midnight; a delivery boy sees only his own orders, with phone and address only while delivering | `backend/src/delivery_boys.py`, `delivery.py` |
 | Max quantity per add | 20 | `ProductCard.tsx`, `ProductDetailSheet.tsx` |

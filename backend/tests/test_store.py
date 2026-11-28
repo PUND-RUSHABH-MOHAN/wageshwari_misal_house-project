@@ -1,5 +1,6 @@
-"""Part 7b: 9 AM - 9 PM hourly slots, and the admin switch that stops online orders."""
+"""Parts 7b/7d: ordering hours, the cooking-time setting and the switch that stops online orders."""
 import json
+from datetime import datetime
 
 import pytest
 
@@ -9,7 +10,7 @@ import orders
 import store
 from test_orders import (  # noqa: F401 - clock and env are pytest fixtures used by name
     ALICE,
-    TOMORROW,
+    IST,
     clock,
     env,
     ev,
@@ -37,34 +38,45 @@ def set_store(body, claims=CHEF):
     return invoke(admin, event)[:2]
 
 
-# ---------------------------------------------------------------- slots
-def test_slots_are_hourly_9am_to_9pm():
-    starts = [s[3] for s in orders.SLOTS]
-    assert starts == list(range(9, 21))
-    assert min(starts) == store.OPEN_HOUR and max(starts) + 1 == store.CLOSE_HOUR
-    labels = list(orders.SLOTS_BY_LABEL)
-    assert len(set(labels)) == 12
-    assert labels[0] == "Morning 9:00 - 10:00 AM"
-    assert "Morning 11:00 AM - 12:00 PM" in labels
-    assert labels[-1] == "Evening 8:00 - 9:00 PM"
+# ---------------------------------------------------------------- hours
+def test_ordering_hours_9am_to_830pm():
+    assert store.within_hours(datetime(2026, 11, 13, 9, 0, tzinfo=IST))
+    assert store.within_hours(datetime(2026, 11, 13, 20, 30, tzinfo=IST))
+    assert not store.within_hours(datetime(2026, 11, 13, 8, 59, tzinfo=IST))
+    assert not store.within_hours(datetime(2026, 11, 13, 20, 31, tzinfo=IST))
 
 
-def test_old_slot_labels_refused(env):
+# ---------------------------------------------------------------- cooking time
+def test_cooking_time_setting_changes_new_estimates(env):
     adr = make_address()
-    status, out, _ = place(adr, slot_label="Early Bird 7:00 - 8:00 AM")
+    status, out = set_store({"prep_minutes": 35})
+    assert status == 200 and out["prep_minutes"] == 35 and out["accepting_orders"] is True
+    _, o, _ = place(adr)
+    assert o["prep_minutes"] == 35
+    assert get_store()[0]["prep_minutes"] == 35
+
+
+def test_cooking_time_keeps_the_switch(env):
+    set_store({"accepting_orders": False, "message": "Rain"})
+    status, out = set_store({"prep_minutes": 25})
+    assert status == 200 and out["accepting_orders"] is False and out["message"] == "Rain"
+    status, out = set_store({"accepting_orders": True})
+    assert out["prep_minutes"] == 25  # re-opening keeps the cooking time
+
+
+@pytest.mark.parametrize("minutes", [4, 91, "20", 20.5, True])
+def test_cooking_time_validation(env, minutes):
+    status, out = set_store({"prep_minutes": minutes})
     assert status == 400 and out["error"]["code"] == "VALIDATION_ERROR"
-
-
-def test_evening_slot_can_be_booked(env):
-    adr = make_address()
-    status, o, _ = place(adr, slot_label="Evening 8:00 - 9:00 PM")
-    assert status == 201 and o["slot_label"] == "Evening 8:00 - 9:00 PM"
 
 
 # ---------------------------------------------------------------- GET /store
 def test_open_by_default(env):
     body, resp = get_store()
-    assert body == {"accepting_orders": True, "message": "", "opens_at": "09:00", "closes_at": "21:00"}
+    assert body == {
+        "accepting_orders": True, "message": "", "opens_at": "09:00", "closes_at": "21:00",
+        "last_order_at": "20:30", "prep_minutes": 20,
+    }
     assert resp["headers"]["Cache-Control"] == "no-store"
 
 
@@ -76,11 +88,9 @@ def test_close_blocks_all_new_orders(env):
     assert body["accepting_orders"] is False and body["message"] == "Closed today for Diwali"
 
     adr = make_address()
-    for day in (None, TOMORROW):  # today and pre-orders for tomorrow
-        over = {"delivery_date": day} if day else {}
-        status, out, _ = place(adr, key=f"closed-{day}", **over)
-        assert status == 409 and out["error"]["code"] == "STORE_CLOSED"
-        assert out["error"]["message"] == "Closed today for Diwali"
+    status, out, _ = place(adr, key="closed-1")
+    assert status == 409 and out["error"]["code"] == "STORE_CLOSED"
+    assert out["error"]["message"] == "Closed today for Diwali"
 
 
 def test_close_without_message_uses_default(env):

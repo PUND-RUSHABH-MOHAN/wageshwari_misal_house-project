@@ -2,6 +2,12 @@
 
 locals {
   lambda_src_orders_2 = <<PYSRC
+  PK = "USER#<sub>",  SK = "ORDER#<id>"         the order (ids sort by time)
+  PK = "USER#<sub>",  SK = "IDEMP#<key>"        idempotency record, expires_at = TTL
+  PK = "COUNTER",     SK = "ORDER#<YYYYMMDD>"   daily running number for order_number
+  PK = "ORDERREF#<id>", SK = "ORDER"            which user an order belongs to (admin lookups)
+  PK = "UTR#<utr>",   SK = "UTR"                which order a UPI reference was used for (no reuse)
+  Orders also carry GSI1PK = "ORDERDATE#<delivery_date>" / GSI1SK: index GSI1 lists a day's
   orders by slot for the kitchen (admin.py).
 """
 
@@ -12,7 +18,7 @@ import json
 import os
 import re
 import secrets
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
@@ -21,6 +27,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 import addresses
+import eta
 import store
 import users
 from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response
@@ -34,35 +41,15 @@ MAX_QUANTITY = 20
 NOTE_MAX = 120
 SPICE_LEVELS = ("mild", "medium", "teekha")
 PAYMENT_METHODS = ("cod", "online")
-CANCELLABLE = ("PENDING_PAYMENT", "PENDING", "CONFIRMED")
+CANCELLABLE = ("PENDING_PAYMENT", "PENDING", "CONFIRMED", "PREPARING", "ASSIGNED")
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
-SLOT_CUTOFF_MINUTES = 30
 LIST_LIMIT = 50
 
-# Mirror of DELIVERY_SLOTS in the app (src/utils/pricing.ts); label = f"{name} {time}".
-# One-hour slots, 9:00 AM - 9:00 PM (owner, 2026-11-27). Orders placed with the old
-# 7 AM - 1 PM slots keep their stored label.
-SLOTS = [
-    ("slot_09", "Morning", "9:00 - 10:00 AM", 9),
-    ("slot_10", "Morning", "10:00 - 11:00 AM", 10),
-    ("slot_11", "Morning", "11:00 AM - 12:00 PM", 11),
-    ("slot_12", "Afternoon", "12:00 - 1:00 PM", 12),
-    ("slot_13", "Afternoon", "1:00 - 2:00 PM", 13),
-    ("slot_14", "Afternoon", "2:00 - 3:00 PM", 14),
-    ("slot_15", "Afternoon", "3:00 - 4:00 PM", 15),
-    ("slot_16", "Afternoon", "4:00 - 5:00 PM", 16),
-    ("slot_17", "Evening", "5:00 - 6:00 PM", 17),
-    ("slot_18", "Evening", "6:00 - 7:00 PM", 18),
-    ("slot_19", "Evening", "7:00 - 8:00 PM", 19),
-    ("slot_20", "Evening", "8:00 - 9:00 PM", 20),
-]
-SLOTS_BY_LABEL = {f"{name} {span}": (slot_id, start) for slot_id, name, span, start in SLOTS}
 
 _ORDER_ID_RE = re.compile(r"^ord_\d{13}[0-9a-f]{6}$")
 _ADDRESS_ID_RE = re.compile(r"^adr_[0-9a-f]{16}$")
 _PRODUCT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UTR_RE = re.compile(r"^\d{12}$")  # UPI transaction reference (RRN): 12 digits
 
 
@@ -88,5 +75,19 @@ def upi_settings() -> tuple[str, str]:
 
 
 def payment_window() -> timedelta:
+    return timedelta(minutes=int(os.environ.get("PAYMENT_WINDOW_MINUTES", "30")))
+
+
+def amount_text(paise: int) -> str:
+    """25050 -> "250.50" (the `am` format UPI apps expect)."""
+    return f"{paise // 100}.{paise % 100:02d}"
+
+
+def upi_payment(item: dict) -> dict | None:
+    """What the app needs to pay a UPI order that isn't paid yet, else None."""
+    vpa, name = upi_settings()
+    if (
+        not vpa
+        or item.get("payment_method") != "online"
 PYSRC
 }

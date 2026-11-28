@@ -3,6 +3,7 @@ behind the JWT authorizer; the user id is always the token's `sub`, never the re
 
 Routes
   POST /orders              -> 201 Order   (needs an Idempotency-Key header)
+  GET  /orders/estimate     -> Estimate    ?address_id= (optional): delivery time before ordering (part 7d)
   GET  /orders              -> Order[]     (newest first, latest 50)
   GET  /orders/{id}         -> Order
   POST /orders/{id}/cancel  -> 200 Order
@@ -19,15 +20,18 @@ Rules (the app shows the same ones; the server's answer is final)
     The customer pays in their UPI app and sends the 12-digit UTR; the kitchen checks its UPI app
     and confirms (admin.py). There's no gateway, so nothing confirms payments automatically.
     Unpaid UPI orders without a UTR are cancelled after PAYMENT_WINDOW_MINUTES (expire.py).
-  - Delivery date: today or tomorrow in India time (IST, fixed +05:30). One-hour slots from
-    9:00 AM to 9:00 PM; a slot for today closes 30 minutes before it starts.
+  - When (part 7d): every order is for today, now. There are no dates or slots to choose; old app
+    builds that still send `delivery_date` / `slot_label` have them ignored. Orders are taken
+    9:00 AM - 8:30 PM IST (else 409 KITCHEN_CLOSED). The server works out `estimated_delivery_at`
+    (eta.py) and stores it with `original_estimated_delivery_at`, `prep_minutes`, `travel_minutes`.
   - The hotel can switch online orders off (store.py): new orders get 409 STORE_CLOSED.
   - The address must be the user's and still inside the delivery area.
   - Status flow (part 7c): PENDING / PENDING_PAYMENT -> CONFIRMED -> ASSIGNED (to a delivery boy)
     -> OUT_FOR_DELIVERY -> DELIVERED. Orders from before part 7c may still be PREPARING.
-  - Cancel only while PENDING / PENDING_PAYMENT / CONFIRMED (before a delivery boy is assigned),
-    and not once a UPI payment has been reported (UTR sent): that needs a refund, so the hotel
-    handles it.
+  - Cancel (part 7d): until the order is OUT_FOR_DELIVERY (PENDING, PENDING_PAYMENT, CONFIRMED,
+    PREPARING, ASSIGNED). One conditional write, so it can't cross with the delivery boy's
+    "Picked up": whichever lands first wins. A UPI order the customer already paid (or sent a UTR
+    for) gets `refund_status: "pending"`; the hotel refunds by hand and marks it (admin.py).
   - Once assigned, the customer sees the delivery boy's name and phone (name only once delivered).
   - Idempotency: the same Idempotency-Key with the same body returns the first order instead
     of creating a second one (records expire after 24 h via the table's TTL).
@@ -49,7 +53,7 @@ import json
 import os
 import re
 import secrets
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
@@ -58,6 +62,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 import addresses
+import eta
 import store
 import users
 from common import ApiError, _json_default, dispatch, jwt_claims, parse_body, response
@@ -71,35 +76,15 @@ MAX_QUANTITY = 20
 NOTE_MAX = 120
 SPICE_LEVELS = ("mild", "medium", "teekha")
 PAYMENT_METHODS = ("cod", "online")
-CANCELLABLE = ("PENDING_PAYMENT", "PENDING", "CONFIRMED")
+CANCELLABLE = ("PENDING_PAYMENT", "PENDING", "CONFIRMED", "PREPARING", "ASSIGNED")
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
-SLOT_CUTOFF_MINUTES = 30
 LIST_LIMIT = 50
 
-# Mirror of DELIVERY_SLOTS in the app (src/utils/pricing.ts); label = f"{name} {time}".
-# One-hour slots, 9:00 AM - 9:00 PM (owner, 2026-11-27). Orders placed with the old
-# 7 AM - 1 PM slots keep their stored label.
-SLOTS = [
-    ("slot_09", "Morning", "9:00 - 10:00 AM", 9),
-    ("slot_10", "Morning", "10:00 - 11:00 AM", 10),
-    ("slot_11", "Morning", "11:00 AM - 12:00 PM", 11),
-    ("slot_12", "Afternoon", "12:00 - 1:00 PM", 12),
-    ("slot_13", "Afternoon", "1:00 - 2:00 PM", 13),
-    ("slot_14", "Afternoon", "2:00 - 3:00 PM", 14),
-    ("slot_15", "Afternoon", "3:00 - 4:00 PM", 15),
-    ("slot_16", "Afternoon", "4:00 - 5:00 PM", 16),
-    ("slot_17", "Evening", "5:00 - 6:00 PM", 17),
-    ("slot_18", "Evening", "6:00 - 7:00 PM", 18),
-    ("slot_19", "Evening", "7:00 - 8:00 PM", 19),
-    ("slot_20", "Evening", "8:00 - 9:00 PM", 20),
-]
-SLOTS_BY_LABEL = {f"{name} {span}": (slot_id, start) for slot_id, name, span, start in SLOTS}
 
 _ORDER_ID_RE = re.compile(r"^ord_\d{13}[0-9a-f]{6}$")
 _ADDRESS_ID_RE = re.compile(r"^adr_[0-9a-f]{16}$")
 _PRODUCT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UTR_RE = re.compile(r"^\d{12}$")  # UPI transaction reference (RRN): 12 digits
 
 
@@ -240,16 +225,8 @@ def _clean_request(body: dict) -> dict:
     address_id = body.get("address_id")
     if not isinstance(address_id, str) or not address_id:
         raise ApiError(400, "VALIDATION_ERROR", "`address_id` is required.")
-    delivery_date = body.get("delivery_date")
-    if not isinstance(delivery_date, str) or not _DATE_RE.match(delivery_date):
-        raise ApiError(400, "VALIDATION_ERROR", "`delivery_date` must be YYYY-MM-DD.")
-    try:
-        date.fromisoformat(delivery_date)
-    except ValueError as exc:
-        raise ApiError(400, "VALIDATION_ERROR", "`delivery_date` is not a real date.") from exc
-    slot_label = body.get("slot_label")
-    if not isinstance(slot_label, str) or slot_label not in SLOTS_BY_LABEL:
-        raise ApiError(400, "VALIDATION_ERROR", "`slot_label` is not one of our delivery slots.")
+    # `delivery_date` / `slot_label` (sent by app builds from before part 7d) are ignored on purpose:
+    # every order is for today, now, and the server works out the delivery time.
     payment = body.get("payment_method")
     if payment not in PAYMENT_METHODS:
         raise ApiError(400, "VALIDATION_ERROR", "`payment_method` must be cod or online.")
@@ -259,8 +236,6 @@ def _clean_request(body: dict) -> dict:
         )
     return {
         "address_id": address_id,
-        "delivery_date": delivery_date,
-        "slot_label": slot_label,
         "payment_method": payment,
         "items": _clean_items(body.get("items")),
     }
@@ -273,20 +248,6 @@ def _request_hash(request: dict) -> str:
 # ---------------------------------------------------------------------------
 # Business rules
 # ---------------------------------------------------------------------------
-def _check_slot(delivery_date: str, slot_label: str, now: datetime) -> tuple[str, int]:
-    now_ist = now.astimezone(IST)
-    today = now_ist.date()
-    day = date.fromisoformat(delivery_date)
-    if day not in (today, today + timedelta(days=1)):
-        raise ApiError(409, "SLOT_UNAVAILABLE", "Delivery can be booked for today or tomorrow only.")
-    slot_id, start_hour = SLOTS_BY_LABEL[slot_label]
-    if day == today and now_ist.hour * 60 + now_ist.minute >= start_hour * 60 - SLOT_CUTOFF_MINUTES:
-        raise ApiError(
-            409, "SLOT_UNAVAILABLE", "That delivery slot has closed for today. Please pick a later slot or tomorrow."
-        )
-    return slot_id, start_hour
-
-
 def _address_snapshot(claims: dict, address_id: str) -> dict:
     if not _ADDRESS_ID_RE.match(address_id):
         raise ApiError(404, "NOT_FOUND", "Delivery address not found.")
@@ -359,6 +320,10 @@ ORDER_FIELDS = (
     "cancelled_by", "cancel_reason",  # only on cancelled orders (kitchen / system cancels give a reason)
     "utr", "payment_expires_at",  # UPI orders: the reference the customer sent; pay-by time
     "delivered_at",
+    "cancelled_at",
+    # part 7d: delivery estimate and refunds
+    "estimated_delivery_at", "original_estimated_delivery_at", "prep_minutes", "travel_minutes", "delay_reason",
+    "refund_status", "refund_reference",
 )
 DELIVERY_ACTIVE = ("ASSIGNED", "OUT_FOR_DELIVERY")
 
@@ -374,6 +339,10 @@ def to_order(item: dict) -> dict:
     pay = upi_payment(item)
     if pay:
         out["upi_payment"] = pay
+    late = eta.delay_minutes(item)
+    if late:
+        out["delay_minutes"] = late
+        out["delayed"] = late >= eta.DELAY_NOTICE_MINUTES and item.get("status") not in ("DELIVERED", "CANCELLED")
     if item.get("delivery_boy_id") and item.get("status") in (*DELIVERY_ACTIVE, "DELIVERED"):
         # Part 7c: who brings the order. The phone only while the delivery is on.
         out["delivery_boy"] = {"name": item.get("delivery_boy_name", "")}
@@ -462,8 +431,9 @@ def create_order(event: dict) -> dict:
         return _replay(user_id, record, request_hash)  # placed before any closing: still answered
 
     store.ensure_open()  # 409 STORE_CLOSED while the hotel has online orders switched off
+    now_ist = now.astimezone(IST)
+    store.ensure_ordering_hours(now_ist)  # 409 KITCHEN_CLOSED outside 9:00 AM - 8:30 PM
 
-    slot_id, start_hour = _check_slot(request["delivery_date"], request["slot_label"], now)
     snapshot = _address_snapshot(claims, request["address_id"])
 
     order_id = f"ord_{int(now.timestamp() * 1000):013d}{secrets.token_hex(3)}"
@@ -479,6 +449,8 @@ def create_order(event: dict) -> dict:
         )
 
     created_at = _iso(now)
+    today = now_ist.date().isoformat()
+    estimate = eta.estimate(now, snapshot.get("distance_km"))
     upi = request["payment_method"] == "online"
     status = "PENDING_PAYMENT" if upi else "PENDING"
     order = _to_ddb(
@@ -489,10 +461,12 @@ def create_order(event: dict) -> dict:
             "order_number": _next_order_number(now),
             "user_id": user_id,
             "address_snapshot": snapshot,
-            "delivery_date": request["delivery_date"],
-            "slot_label": request["slot_label"],
-            "slot_id": slot_id,
-            "slot_start_hour": start_hour,
+            "delivery_date": today,  # always today (part 7d)
+            "placed_at": created_at,
+            "estimated_delivery_at": estimate["estimated_delivery_at"],
+            "original_estimated_delivery_at": estimate["estimated_delivery_at"],
+            "prep_minutes": estimate["prep_minutes"],
+            "travel_minutes": estimate["travel_minutes"],
             "status": status,  # COD: PENDING until the kitchen confirms; UPI: PENDING_PAYMENT until it sees the money
             **bill,
             "payment_method": request["payment_method"],
@@ -502,9 +476,9 @@ def create_order(event: dict) -> dict:
             "items": lines,
             "status_history": [history_entry(status, created_at, "customer")],
             **({"payment_expires_at": _iso(now + payment_window())} if upi else {}),
-            # Index GSI1: the kitchen's "all orders for a delivery date, by slot" (admin.py).
-            "GSI1PK": f"ORDERDATE#{request['delivery_date']}",
-            "GSI1SK": f"{start_hour:02d}#{created_at}#{order_id}",
+            # Index GSI1: the kitchen's "all orders for a day" (admin.py), in the order placed.
+            "GSI1PK": f"ORDERDATE#{today}",
+            "GSI1SK": f"{now_ist.hour:02d}#{created_at}#{order_id}",
         }
     )
     record = {
@@ -528,6 +502,36 @@ def create_order(event: dict) -> dict:
     return response(201, to_order(order))
 
 
+def get_estimate(event: dict) -> dict:
+    """GET /orders/estimate?address_id=: what the cart and dish details show before ordering.
+
+    Without address_id: the user's default address, else a typical distance (`approximate: true`).
+    `can_order` / `closed_reason` say whether an order placed now would be accepted.
+    """
+    claims = jwt_claims(event)
+    address_id = (event.get("queryStringParameters") or {}).get("address_id") or addresses._default_id(claims)
+    distance = None
+    if address_id:
+        try:
+            distance = _address_snapshot(claims, address_id).get("distance_km")
+        except ApiError as err:
+            if err.status == 422:  # outside the delivery area: say so in the cart, not here
+                raise
+            if (event.get("queryStringParameters") or {}).get("address_id"):
+                raise
+    now = _now_utc()
+    out = {k: v for k, v in eta.estimate(now, distance).items() if k != "queue"}
+    out["approximate"] = distance is None
+    status = store.to_store(store.get_settings())
+    if not status["accepting_orders"]:
+        out.update({"can_order": False, "closed_reason": status["message"]})
+    elif not store.within_hours(now.astimezone(IST)):
+        out.update({"can_order": False, "closed_reason": "We take online orders from 9:00 AM to 8:30 PM."})
+    else:
+        out["can_order"] = True
+    return response(200, out, {"Cache-Control": "no-store"})
+
+
 def list_orders(event: dict) -> dict:
     user_id = jwt_claims(event)["sub"]
     page = users.table().query(
@@ -545,49 +549,68 @@ def get_order(event: dict) -> dict:
 
 
 def cancel_order(event: dict) -> dict:
+    """POST /orders/{id}/cancel: allowed until the order is out for delivery (part 7d).
+
+    Conditional on the status read here, so a "Picked up" that lands first wins and this answers 409.
+    Paid UPI orders (or ones with a UTR) get refund_status "pending" for the hotel to refund by hand.
+    """
     user_id = jwt_claims(event)["sub"]
     order_id = (event.get("pathParameters") or {}).get("id", "")
     current = _get_order_item(user_id, order_id)
     if current["status"] == "CANCELLED":
         return response(200, to_order(current))  # cancelling twice is harmless
+    if current["status"] not in CANCELLABLE:
+        raise ApiError(409, "ORDER_NOT_CANCELLABLE", _not_cancellable_message(current["status"]))
     now = _iso(_now_utc())
+    sets = [
+        "#s = :cancelled", "cancelled_at = :now", "updated_at = :now", "cancelled_by = :by",
+        "status_history = list_append(if_not_exists(status_history, :empty), :entry)",
+    ]
+    values = {
+        ":cancelled": "CANCELLED",
+        ":now": now,
+        ":current": current["status"],
+        ":by": "customer",
+        ":empty": [],
+        ":entry": [history_entry("CANCELLED", now, "customer")],
+    }
+    if needs_refund(current):
+        sets.append("refund_status = :refund")
+        values[":refund"] = "pending"
     try:
         updated = users.table().update_item(
             Key=_key(user_id, f"ORDER#{current['id']}"),
-            UpdateExpression=(
-                "SET #s = :cancelled, cancelled_at = :now, updated_at = :now, cancelled_by = :by, "
-                "status_history = list_append(if_not_exists(status_history, :empty), :entry)"
-            ),
-            # Not once a delivery boy has it, and not after a UPI payment was reported (needs a refund).
-            ConditionExpression="#s IN (:s0, :s1, :s2) AND attribute_not_exists(utr)",
+            UpdateExpression="SET " + ", ".join(sets),
+            ConditionExpression="#s = :current",  # nobody moved it on (e.g. Picked up) since we read it
             ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":cancelled": "CANCELLED",
-                ":now": now,
-                ":s0": CANCELLABLE[0],
-                ":s1": CANCELLABLE[1],
-                ":s2": CANCELLABLE[2],
-                ":by": "customer",
-                ":empty": [],
-                ":entry": [history_entry("CANCELLED", now, "customer")],
-            },
+            ExpressionAttributeValues=values,
             ReturnValues="ALL_NEW",
         )["Attributes"]
     except ClientError as err:
         if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
-        if current.get("utr") and current["status"] in CANCELLABLE:
-            raise ApiError(
-                409,
-                "ORDER_NOT_CANCELLABLE",
-                "You've already paid for this order by UPI. Please call the hotel to cancel and get a refund.",
-            ) from err
-        raise ApiError(
-            409,
-            "ORDER_NOT_CANCELLABLE",
-            "A delivery boy already has this order, so it can't be cancelled here. Please call the hotel.",
-        ) from err
+        fresh = _get_order_item(user_id, current["id"])
+        if fresh["status"] == "CANCELLED":
+            return response(200, to_order(fresh))  # a double tap that raced itself
+        if fresh["status"] in CANCELLABLE:
+            raise ApiError(409, "ORDER_CHANGED", "This order just changed. Pull down to refresh and try again.") from err
+        raise ApiError(409, "ORDER_NOT_CANCELLABLE", _not_cancellable_message(fresh["status"])) from err
     return response(200, to_order(updated))
+
+
+def needs_refund(item: dict) -> bool:
+    """A UPI order the customer paid, or says they paid (UTR sent): the hotel must refund or check."""
+    return item.get("payment_method") == "online" and (
+        item.get("payment_status") in ("paid", "submitted") or bool(item.get("utr"))
+    )
+
+
+def _not_cancellable_message(status: str) -> str:
+    if status == "OUT_FOR_DELIVERY":
+        return "Your order is already on the way, so it can't be cancelled now. Please call the hotel if needed."
+    if status == "DELIVERED":
+        return "This order has already been delivered."
+    return "This order can't be cancelled now."
 
 
 def submit_payment(event: dict) -> dict:
@@ -669,6 +692,7 @@ def submit_payment(event: dict) -> dict:
 
 ROUTES = {
     "POST /orders": create_order,
+    "GET /orders/estimate": get_estimate,
     "GET /orders": list_orders,
     "GET /orders/{id}": get_order,
     "POST /orders/{id}/cancel": cancel_order,

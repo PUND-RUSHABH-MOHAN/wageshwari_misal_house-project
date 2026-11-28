@@ -16,8 +16,11 @@ import { ProductImage } from '@/components/ProductImage';
 import { CookingNoteField, SpiceOptions } from '@/components/SpiceLevelSheet';
 import { Button, QuantityStepper, Tag, VegBadge } from '@/components/ui';
 import { Colors, Fonts, Radius, Shadow, Spacing } from '@/constants/theme';
+import { useApp } from '@/context/AppContext';
+import { useDeliveryEstimate } from '@/hooks/useDeliveryEstimate';
 import type { Product, SpiceLevel } from '@/types';
 import { formatCurrency } from '@/utils/format';
+import { aboutMinutes } from '@/utils/pricing';
 
 const HERO_HEIGHT = 300;
 const MAX_QTY = 20;
@@ -45,6 +48,9 @@ export function ProductDetailSheet({
   const [spice, setSpice] = useState<SpiceLevel>('medium');
   const [note, setNote] = useState('');
   const [qty, setQty] = useState(1);
+  // Part 7d: "Delivered in about 35 min" for an order placed now (server estimate).
+  const { selectedAddress } = useApp();
+  const estimate = useDeliveryEstimate(selectedAddress?.id, visible && product !== null);
 
   if (!product) return null;
   const soldOut = !product.is_available;
@@ -103,6 +109,17 @@ export function ProductDetailSheet({
                 ) : null}
               </View>
 
+              {estimate ? (
+                <View style={styles.etaRow}>
+                  <Icon name="clock" size={14} color={estimate.can_order ? Colors.primaryDark : Colors.danger} />
+                  <Text style={[styles.etaText, !estimate.can_order && { color: Colors.danger }]}>
+                    {estimate.can_order
+                      ? `Delivered in ${aboutMinutes(estimate.total_minutes)} if you order now (estimate)`
+                      : (estimate.closed_reason ?? 'Not taking orders right now')}
+                  </Text>
+                </View>
+              ) : null}
+
               <View style={styles.divider} />
 
               <Text style={styles.sectionLabel}>About this dish</Text>
@@ -150,6 +167,8 @@ export function ProductDetailSheet({
 }
 
 const styles = StyleSheet.create({
+  etaRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: Spacing.sm },
+  etaText: { flex: 1, fontSize: 13, fontWeight: '700', color: Colors.primaryDark },
   root: { flex: 1, justifyContent: 'flex-end' },
   backdrop: { ...StyleSheet.absoluteFill, backgroundColor: Colors.overlay },
   sheet: {

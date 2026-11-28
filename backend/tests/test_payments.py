@@ -11,7 +11,7 @@ import orders
 from test_orders import (  # noqa: F401 - clock and env are pytest fixtures used by name
     ALICE,
     BOB,
-    SIX_AM,
+    TEN_AM,
     TOMORROW,
     clock,
     env,
@@ -35,7 +35,7 @@ def upi(env, monkeypatch):
 
 def upi_order(claims=ALICE, key="upi-key-0001", **over):
     adr = make_address(claims)
-    status, o, _ = place(adr, claims, key=key, payment_method="online", delivery_date=TOMORROW, **over)
+    status, o, _ = place(adr, claims, key=key, payment_method="online", **over)
     assert status == 201, o
     return o
 
@@ -64,7 +64,7 @@ def get(order_id, claims=ALICE):
 def test_upi_order_waits_for_payment_with_link(upi):
     o = upi_order()
     assert o["status"] == "PENDING_PAYMENT" and o["payment_status"] == "pending" and o["payment_method"] == "online"
-    assert o["payment_expires_at"] == "2026-11-13T01:00:00.000Z"  # 06:00 IST + 30 min
+    assert o["payment_expires_at"] == "2026-11-13T05:00:00.000Z"  # 10:00 IST + 30 min
     p = o["upi_payment"]
     assert p["upi_id"] == "hotel.test@ibl" and p["amount"] == "250.50" and p["note"] == f"Order {o['order_number']}"
     url = urlparse(p["uri"])
@@ -147,12 +147,18 @@ def test_customer_can_cancel_before_paying(upi):
     assert status == 409 and "cancelled" in out["error"]["message"]
 
 
-def test_customer_cannot_cancel_after_sending_utr(upi):
+def test_cancel_after_sending_utr_waits_for_a_refund(upi):
+    """Part 7d: the customer may cancel; the hotel refunds (or checks the money never came) by hand."""
     o = upi_order()
     pay(o["id"])
     status, out, _ = invoke(orders, ev("POST /orders/{id}/cancel", order_id=o["id"]))
-    assert status == 409 and out["error"]["code"] == "ORDER_NOT_CANCELLABLE"
-    assert "refund" in out["error"]["message"]
+    assert status == 200 and out["status"] == "CANCELLED" and out["refund_status"] == "pending"
+
+
+def test_unpaid_upi_cancel_needs_no_refund(upi):
+    o = upi_order()
+    status, out, _ = invoke(orders, ev("POST /orders/{id}/cancel", order_id=o["id"]))
+    assert status == 200 and "refund_status" not in out
 
 
 # ---------------------------------------------------------------- kitchen
@@ -203,10 +209,10 @@ def test_expire_cancels_only_overdue_unpaid(upi):
     adr = make_address(BOB)
     _, cod, _ = place(adr, BOB, key="exp-key-3", delivery_date=TOMORROW)
 
-    upi["clock"]["now"] = SIX_AM + timedelta(minutes=29)
+    upi["clock"]["now"] = TEN_AM + timedelta(minutes=29)
     assert expire.expire_unpaid() == []  # not overdue yet
 
-    upi["clock"]["now"] = SIX_AM + timedelta(minutes=31)
+    upi["clock"]["now"] = TEN_AM + timedelta(minutes=31)
     late = upi_order(BOB, key="exp-key-4")  # placed just now: still has 30 minutes
     assert expire.handler({}, None) == {"cancelled": [unpaid["order_number"]]}
 
@@ -221,7 +227,7 @@ def test_expire_cancels_only_overdue_unpaid(upi):
 def test_expire_skips_order_paid_meanwhile(upi, monkeypatch):
     """The customer sends the UTR between the scan and the write: the conditional write skips it."""
     o = upi_order()
-    upi["clock"]["now"] = SIX_AM + timedelta(minutes=40)
+    upi["clock"]["now"] = TEN_AM + timedelta(minutes=40)
     real = expire._pending_for_day
 
     def stale(day):

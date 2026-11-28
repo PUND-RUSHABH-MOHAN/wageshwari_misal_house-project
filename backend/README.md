@@ -12,6 +12,7 @@ Status:
 - **Part 6, kitchen + menu admin**: deployed 2026-11-25. Order board by day and slot, one-step status moves, kitchen cancel with a reason, menu editing. Admins = Cognito group `admin`.
 - **Part 7b, hours + store switch**: online delivery 9 AM – 9 PM in 12 one-hour slots; admins can stop all new online orders (Kitchen tab) until they switch them back on. Deployed 2026-11-27.
 - **Part 7c, delivery boys**: cash orders wait as Pending; the admin's **Confirm order** also auto-assigns an on-duty delivery boy (or the admin assigns by hand); delivery boys see their orders in a Deliveries tab and mark Picked up / Delivered. Delivery boys = Cognito group `delivery`. Deployed 2026-11-28.
+- **Part 7d, delivery estimate + cancel until out for delivery**: no more date / slot choice; every order is for today, now, and the server works out `estimated_delivery_at` (cooking time + kitchen queue + travel). Orders 9:00 AM – 8:30 PM only. The kitchen can push an estimate later; customers see "running late" from 10 minutes. Customers can cancel until the order is out for delivery; paid UPI orders then wait for a refund made by hand. Deployed 2026-11-28.
 
 ```
 backend/
@@ -23,7 +24,8 @@ backend/
 │   ├── catalog.py           /categories, /products (the menu), /store (open or not)
 │   ├── addresses.py         /addresses (saved delivery addresses, 3 km check)
 │   ├── orders.py            /orders (place, list, view, cancel)
-│   ├── store.py             online-orders switch + delivery hours (used by catalog, orders, admin)
+│   ├── store.py             online-orders switch, ordering hours, cooking time (used by catalog, orders, admin)
+│   ├── eta.py               delivery estimate: cooking + kitchen queue + travel (part 7d)
 │   ├── admin.py             /admin/* (kitchen order board, confirm + assign, menu editing)
 │   ├── delivery_boys.py     delivery boys: on duty, auto-assign, assignment writes (admin + delivery)
 │   ├── delivery.py          /delivery/* (the delivery boy's Deliveries tab)
@@ -34,7 +36,7 @@ backend/
 │   ├── verify-auth.ps1         end-to-end check of auth against the deployed API
 │   ├── verify-catalog.ps1      check of the menu API + CloudFront photos
 │   ├── verify-addresses.ps1    check of the addresses API with a real account
-│   ├── verify-orders.ps1       places one real order for tomorrow, then cancels it
+│   ├── verify-orders.ps1       estimate, then one real order for now, then cancels it
 │   ├── verify-admin.ps1        kitchen + menu admin checks with an admin account
 │   ├── verify-payments.ps1     UPI payment flow with an admin account (no real money)
 │   ├── verify-store.ps1        store switch: stops online orders for a few seconds, then re-opens
@@ -42,7 +44,7 @@ backend/
 └── terraform/               all infrastructure (menu_seed.tf = the starting menu)
 ```
 
-## What gets created (103 resources)
+## What gets created (106 resources)
 
 | AWS piece | Name | What it does |
 |---|---|---|
@@ -50,12 +52,12 @@ backend/
 | Cognito app client | `wmh-app` | How the mobile app identifies itself to the pool. Public (no secret), because anything in an APK can be extracted. |
 | Cognito group | `admin` | Members get `role: "admin"`: the Kitchen tab and Manage menu in the app, and the `/admin/*` routes. Added by hand (see "Make someone an admin"), so no email is in the repo. |
 | Cognito group | `delivery` (`delivery.tf`) | Delivery boys (Part 7c): the Deliveries tab and the `/delivery/*` routes. Added by hand, like admins (see "Add a delivery boy"). One person can be in both groups. |
-| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to) `UTR#<utr>` (which order a UPI reference was used for) `SETTINGS`/`STORE` (the online-orders switch) and `DELIVERY`/`BOY#<sub>` (a delivery boy: on duty, last assignment). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <slot hour>#<created_at>#<id>`), the kitchen board's single query. |
+| DynamoDB table | `wmh-main` | One table for the whole app (`PK`/`SK`). Profiles (`USER#<sub>`/`PROFILE`), addresses (`ADDRESS#…`), orders (`ORDER#…`), the menu (`CATALOG`/`CATEGORY#…`, `PRODUCT#…`), the daily order counter (`COUNTER`/`ORDER#<date>`) and "no double orders" records (`IDEMP#…`), plus `ORDERREF#<id>` (which user an order belongs to) `UTR#<utr>` (which order a UPI reference was used for) `SETTINGS`/`STORE` (the online-orders switch) and `DELIVERY`/`BOY#<sub>` (a delivery boy: on duty, last assignment). On-demand billing, point-in-time recovery, **TTL** on `expires_at` (DynamoDB deletes those records itself, free, some hours after they expire). **Index `GSI1`**: orders by delivery day (`GSI1PK = ORDERDATE#<date>`, `GSI1SK = <hour>#<created_at>#<id>`), the kitchen board's single query and the kitchen-queue count for estimates. |
 | Menu rows | 4 categories, 6 products | Written once by `menu_seed.tf`; Terraform ignores later edits so admin changes (Part 6) stick. |
 | IAM role | `wmh-lambda` | What the Lambdas may do: write their logs; get/put/update/query/delete items in `wmh-main`. Nothing else. |
 | Lambda | `wmh-auth`, `wmh-me`, `wmh-catalog`, `wmh-addresses`, `wmh-orders`, `wmh-admin`, `wmh-delivery`, `wmh-expire` | The handlers. Routing by `event["routeKey"]`. All get the hotel's location and delivery radius as env vars (`SHOP_LATITUDE`, `SHOP_LONGITUDE`, `DELIVERY_RADIUS_KM`, `SHOP_CITY`) from `variables.tf`; `wmh-orders` also gets `MIN_ORDER_PAISE`; orders/admin/expire get `UPI_ID`, `UPI_PAYEE_NAME`, `PAYMENT_WINDOW_MINUTES`. |
 | EventBridge Scheduler | `wmh-expire-unpaid-upi` + IAM role `wmh-scheduler` | AWS's managed timer: runs `wmh-expire` every 10 minutes. Its role may invoke only that function. Free at this volume. |
-| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 38 routes, a JWT authorizer on `/me`, `/addresses`, `/orders`, `/admin/*` and `/delivery/*` (admin.py / delivery.py also check the `admin` / `delivery` group), throttled to 50 req/s (burst 100). |
+| API Gateway HTTP API | `wmh-api` | Public HTTPS front door. 41 routes, a JWT authorizer on `/me`, `/addresses`, `/orders`, `/admin/*` and `/delivery/*` (admin.py / delivery.py also check the `admin` / `delivery` group), throttled to 50 req/s (burst 100). |
 | S3 bucket | `wmh-media-630287363216` | Menu photos under `menu/`. Fully private: all public access blocked. |
 | CloudFront | `d2n5hm5b49hk3p.cloudfront.net` | CDN in front of the bucket (price class 200, includes India). The only reader of the bucket, via Origin Access Control. |
 | CloudWatch log groups | `/aws/lambda/wmh-*`, `/aws/apigateway/wmh-api` | 14-day retention. Access logs never include headers or bodies. |
@@ -79,25 +81,28 @@ Base URL: the `api_base_url` Terraform output. Errors are always
 | `PATCH /me` | JWT | `{name?, phone?}` | `200 User` |
 | `GET /categories` | – | – | `200 Category[]`: active only, by `sort_order` |
 | `GET /products` | – | – | `200 Product[]`: sold-out ones included (`is_available: false`) |
-| `GET /store` | – | – | `200 {accepting_orders, message, opens_at: "09:00", closes_at: "21:00"}` (not cached) |
+| `GET /store` | – | – | `200 {accepting_orders, message, opens_at: "09:00", closes_at: "21:00", last_order_at: "20:30", prep_minutes}` (not cached) |
 | `GET /addresses` | JWT | – | `200 Address[]`: default first, then oldest first |
 | `POST /addresses` | JWT | `{label, receiver_name, receiver_phone, line1, line2?, landmark?, pincode, latitude, longitude, is_default?}` | `201 Address` |
 | `PATCH /addresses/{id}` | JWT | any of the POST fields (`latitude` + `longitude` together) | `200 Address` |
 | `DELETE /addresses/{id}` | JWT | – | `204` |
-| `POST /orders` | JWT + `Idempotency-Key` header | `{address_id, delivery_date, slot_label, payment_method, items: [{product_id, quantity, spice_level?, note?}]}` | `201 Order` |
+| `POST /orders` | JWT + `Idempotency-Key` header | `{address_id, payment_method, items: [{product_id, quantity, spice_level?, note?}]}` (old `delivery_date` / `slot_label` are accepted and ignored) | `201 Order` |
+| `GET /orders/estimate?address_id=` | JWT | – | `200 {prep_minutes, travel_minutes, total_minutes, estimated_delivery_at, approximate, can_order, closed_reason?}` (not cached) |
 | `GET /orders` | JWT | – | `200 Order[]`: newest first, latest 50 |
 | `GET /orders/{id}` | JWT | – | `200 Order` |
-| `POST /orders/{id}/cancel` | JWT | – | `200 Order` (already cancelled → same answer) |
+| `POST /orders/{id}/cancel` | JWT | – | `200 Order` until out for delivery (already cancelled → same answer) |
 | `POST /orders/{id}/payment` | JWT | `{utr}` (12 digits) | `200 Order` with `payment_status: "submitted"` |
-| `GET /admin/orders?date=YYYY-MM-DD` | JWT + admin | – | `200 AdminOrder[]` for that delivery day (default today, IST), by slot then time |
+| `GET /admin/orders?date=YYYY-MM-DD` | JWT + admin | – | `200 AdminOrder[]` for that delivery day (default today, IST), in the order placed |
 | `POST /admin/orders/{id}/status` | JWT + admin | `{status, reason?}` | `200 AdminOrder` |
+| `PATCH /admin/orders/{id}/eta` | JWT + admin | `{delay_minutes: 5–120, reason?}` | `200 AdminOrder` with the later `estimated_delivery_at` |
+| `POST /admin/orders/{id}/refund` | JWT + admin | `{status: "refunded" \| "not_needed", reference?}` (≤ 40 chars) | `200 AdminOrder` (only while `refund_status: "pending"`, else `409 NO_REFUND_PENDING`) |
 | `GET /admin/categories` | JWT + admin | – | `200 Category[]`, hidden ones included |
 | `POST /admin/categories` | JWT + admin | `{name, name_mr?, image_url?, sort_order?, is_active?}` | `201 Category` |
 | `PATCH /admin/categories/{id}` | JWT + admin | any of the POST fields | `200 Category` |
 | `GET /admin/products` | JWT + admin | – | `200 AdminProduct[]`, hidden ones included |
 | `POST /admin/products` | JWT + admin | `{category_id, name, price, name_mr?, description?, image_url?, is_veg?, has_spice_level?, is_available?, is_active?}` | `201 AdminProduct` |
 | `PATCH /admin/products/{id}` | JWT + admin | any of the POST fields | `200 AdminProduct` |
-| `PATCH /admin/store` | JWT + admin | `{accepting_orders: bool, message?}` (message ≤ 120 chars) | `200 {…StoreStatus, updated_at, updated_by}` |
+| `PATCH /admin/store` | JWT + admin | `{accepting_orders: bool, message?}` (message ≤ 120 chars) and/or `{prep_minutes: 5–90}` | `200 {…StoreStatus, updated_at, updated_by}` |
 | `POST /admin/orders/{id}/assign` | JWT + admin | `{delivery_boy_id}` | `200 AdminOrder` (status `ASSIGNED`; same person again → `auto_assign: "unchanged"`) |
 | `GET /admin/delivery-boys` | JWT + admin | – | `200 DeliveryBoy[]` `{id, name, phone, on_duty, active_orders, last_assigned_at}`, on duty first |
 | `PATCH /admin/delivery-boys/{id}` | JWT + admin | `{on_duty: false}` | `200 DeliveryBoy` (only the delivery boy can switch himself on) |
@@ -131,11 +136,19 @@ Order rules (all enforced by the server; the app shows the same ones):
   Change `min_order_paise` in `terraform/variables.tf` (and `MIN_ORDER_PAISE` in the app's `pricing.ts`).
 - **Payment**: `cod` starts `PENDING` (waits for the kitchen to confirm, Part 7c), `payment_status: "pending"` (paid on delivery). `online` = direct UPI
   (Part 7, below); if no UPI ID is configured it's `400 PAYMENT_METHOD_UNAVAILABLE`.
-- **Delivery hours 9 AM – 9 PM**, 12 one-hour slots (`SLOTS` in `orders.py`, `slot_09` … `slot_20`):
-  Morning 9–10, 10–11, 11–12 · Afternoon 12–1 … 4–5 · Evening 5–6 … 8–9. `slot_label` must be one of these
-  labels exactly, e.g. `"Morning 9:00 - 10:00 AM"`, `"Afternoon 12:00 - 1:00 PM"`, `"Evening 8:00 - 9:00 PM"`.
-- **Dates in India time** (IST, fixed +05:30): today or tomorrow only; a slot for today closes 30 minutes
-  before it starts → `409 SLOT_UNAVAILABLE`.
+- **When (Part 7d)**: every order is for **today, now**. No dates, no slots, no pre-orders. Orders are taken
+  **9:00 AM – 8:30 PM IST** (`store.py` `OPEN_HOUR`, `LAST_ORDER`), else `409 KITCHEN_CLOSED`. `delivery_date` is
+  set to today (IST). Old app builds that still send `delivery_date` / `slot_label` have them ignored.
+- **Delivery estimate (Part 7d, `eta.py`)**, worked out by the server, never taken from the app:
+  cooking = the hotel's `prep_minutes` (default 20, 5–90, set in the Kitchen tab) + 2 min for each order already in
+  today's kitchen queue (`PENDING`, `CONFIRMED`, `ASSIGNED`, … ; unpaid UPI orders without a UTR don't count), at most
+  +30; travel = 5 min + 4 min per km of the address's straight-line distance (no Maps API). The sum is rounded up to
+  the next 5 minutes. Stored on the order: `placed_at`, `estimated_delivery_at`, `original_estimated_delivery_at`,
+  `prep_minutes`, `travel_minutes`. **Confirm** recalculates from that moment and keeps the later of the two;
+  **Picked up** sets now + travel; the kitchen can **delay** it (`PATCH /admin/orders/{id}/eta`, 5–120 min, from the
+  current estimate or from now if that has passed, optional `delay_reason` shown to the customer). `Order` adds
+  `delay_minutes` (current − first) and `delayed: true` from 10 minutes late until delivered or cancelled.
+  All times are labelled "estimate" in the app.
 - **Online orders switched off** (store switch, below) → `409 STORE_CLOSED` with the hotel's message.
 - **Items**: 1–20 lines, quantity 1–20, `spice_level` only on dishes with spice levels, `note` ≤ 120 chars.
   Unknown or sold-out dish → `409 PRODUCT_UNAVAILABLE` (the app reloads the menu).
@@ -145,10 +158,15 @@ Order rules (all enforced by the server; the app shows the same ones):
 - **No double orders**: the same `Idempotency-Key` + same body within 24 h returns the first order
   (`Idempotent-Replayed: true` header); same key + different body → `409 IDEMPOTENCY_CONFLICT`. The order
   and the key record are written in one DynamoDB transaction, so two simultaneous retries can't both win.
-- **Cancel** only while `PENDING`, `PENDING_PAYMENT` or `CONFIRMED` (before a delivery boy is assigned) → else `409 ORDER_NOT_CANCELLABLE`.
+- **Cancel (Part 7d)** while `PENDING`, `PENDING_PAYMENT`, `CONFIRMED`, `PREPARING` or `ASSIGNED`, i.e. until the
+  order is out for delivery; `OUT_FOR_DELIVERY` / `DELIVERED` → `409 ORDER_NOT_CANCELLABLE` ("already on the way").
+  The write is conditional on the status the server read, so it can't cross with the delivery boy's "Picked up":
+  whichever lands first wins (the loser gets `409 ORDER_CHANGED` / `ORDER_NOT_CANCELLABLE`). Cancelling twice is
+  harmless (`200`). Sets `cancelled_at`, `cancelled_by: "customer"`. A UPI order that was paid, or has a UTR, gets
+  `refund_status: "pending"` (see the refund rules below). Cash orders need no refund.
 - Once assigned, `Order.delivery_boy = {name, phone}` (just `{name}` once delivered).
-- Stored but not returned: `GSI1PK = ORDERDATE#<delivery_date>`, `GSI1SK = <slot hour>#<created_at>#<id>`,
-  ready for the Part 6 kitchen index ("all orders for a day, by slot") without a data migration.
+- Stored but not returned: `GSI1PK = ORDERDATE#<delivery_date>`, `GSI1SK = <hour placed>#<created_at>#<id>`
+  (orders from before Part 7d used the slot's hour).
 
 Direct UPI rules (Part 7). There's **no payment gateway**, so nothing tells the server that money arrived:
 a person checks the hotel's UPI app.
@@ -158,8 +176,14 @@ a person checks the hotel's UPI app.
 - `POST /orders/{id}/payment {utr}`: the customer's 12-digit UTR (UPI reference). `payment_status: "submitted"`.
   A UTR can be used for one order only (`409 UTR_ALREADY_USED`); a mistyped UTR can be replaced until the kitchen
   confirms. Cancelled / paid / cash orders → `409 ORDER_NOT_PAYABLE`.
-- The customer can cancel until they send a UTR; after that it's `409 ORDER_NOT_CANCELLABLE` (refunds go through
-  the hotel, by hand, from its UPI app).
+- The customer can cancel until the order is out for delivery, also after paying (Part 7d). If they had paid or
+  sent a UTR, the order gets `refund_status: "pending"`.
+- **Refunds (Part 7d), by hand.** With no gateway nothing can confirm a refund, so the server never marks one
+  refunded by itself. The kitchen refunds from the hotel's UPI app, then records it:
+  `POST /admin/orders/{id}/refund {status: "refunded", reference?}` (only after the money has gone back) or
+  `{status: "not_needed"}` (no payment ever arrived). Only a `pending` refund can be recorded (conditional write,
+  else `409 NO_REFUND_PENDING`). The customer sees `refund_status` and `refund_reference`; admins also get
+  `refunded_at` / `refunded_by`.
 - Kitchen: `PENDING_PAYMENT → CONFIRMED` = "Payment received" (sets `payment_status: "paid"`), allowed with or
   without a UTR. Money not there → kitchen cancel with a reason. Cooking can't start before payment.
 - `wmh-expire` (every 10 min) cancels `PENDING_PAYMENT` orders **without a UTR** whose `payment_expires_at` has
@@ -177,10 +201,13 @@ Admin rules (Part 6):
   (fallback for the delivery boy). Orders from before Part 7c may be `PREPARING → OUT_FOR_DELIVERY`. `DELIVERED` also sets `payment_status: "paid"` for cash orders. Each move is
   conditional on the status the admin saw, so two people tapping at once can't skip a step (`409 ORDER_CHANGED`).
 - **Kitchen cancel**: any order not yet delivered, with a `reason` of 3–120 characters, shown to the customer
-  as `cancel_reason` (`cancelled_by: "kitchen"`). Customer cancels record `cancelled_by: "customer"`; UPI
+  as `cancel_reason` (`cancelled_by: "kitchen"`, plus `cancelled_at`; paid UPI orders get `refund_status: "pending"`). Customer cancels record `cancelled_by: "customer"`; UPI
   auto-cancels `cancelled_by: "system"`.
 - `AdminOrder` = `Order` + `status_history: [{status, at, by}]` (`by` = `"customer"`, `"auto"`, `"system"` or a staff email)
-  + `delivery_boy {id, name, phone}`, `assigned_at`, `assigned_by` (`"auto"` or the admin's email).
+  + `delivery_boy {id, name, phone}`, `assigned_at`, `assigned_by` (`"auto"` or the admin's email)
+  + (Part 7d) `eta_updated_by`, `refunded_at`, `refunded_by`.
+- **Delays and finished orders** (Part 7d): `PATCH …/eta` on a delivered or cancelled order → `409 INVALID_STATUS_CHANGE`.
+  A cancelled order can't be confirmed, assigned or moved on (`409`).
 - **Menu**: `AdminProduct` = `Product` + `is_active`. `is_active: false` hides a dish from `GET /products` and
   ordering it gives `409 PRODUCT_UNAVAILABLE`; `is_available: false` shows it as sold out. Prices ₹1–₹5,000
   (100–500000 paise). New ids come from the name (`prd_kanda_bhaji`), with a random suffix if taken.
@@ -203,15 +230,16 @@ Delivery boys (Part 7c):
 - **Delivery boy's view** (`DeliveryOrder`): only orders assigned to him (others answer `404`). While `ASSIGNED` /
   `OUT_FOR_DELIVERY` he gets `customer {name, phone}`, `address {line1, line2?, landmark?, city, state, pincode,
   latitude, longitude}`, items and `collect_cash` (paise; 0 if paid by UPI). Finished orders keep only the order
-  number, area and status. `state` is always Maharashtra (addresses don't store one).
+  number, area and status (cancelled ones also `cancelled_by`). `state` is always Maharashtra (addresses don't store
+  one). Part 7d: every order carries `estimated_delivery_at`; the list is soonest first.
 - He moves `ASSIGNED → OUT_FOR_DELIVERY` ("Picked up") → `DELIVERED` (cash marked paid). A double tap is harmless;
-  a kitchen-cancelled order answers `409` "Please don't deliver it".
+  a cancelled order answers `409` "The customer / The hotel cancelled this order. Please don't deliver it."
+  The app checks every 20 s and pops up that notice when one of his orders is cancelled (no push notifications yet).
 
 Store switch (Part 7b):
-- One item, `PK = "SETTINGS"`, `SK = "STORE"`: `accepting_orders`, `message`, `updated_at`, `updated_by`.
-  No item = open.
-- `PATCH /admin/store {accepting_orders: false, message?}` stops **all** new online orders, for today and
-  tomorrow, until an admin sends `{accepting_orders: true}` (no automatic re-opening). Re-opening clears the message.
+- One item, `PK = "SETTINGS"`, `SK = "STORE"`: `accepting_orders`, `message`, `prep_minutes` (Part 7d),
+  `updated_at`, `updated_by`. No item = open, 20 min cooking. Changing one setting keeps the others.
+- `PATCH /admin/store {accepting_orders: false, message?}` stops **all** new online orders until an admin sends `{accepting_orders: true}` (no automatic re-opening). Re-opening clears the message.
 - While closed, `POST /orders` → `409 STORE_CLOSED` (message = the hotel's, or a default). Orders already placed
   are untouched: the kitchen keeps working them, customers can still pay, cancel and see their status.
   A retry of an order placed *before* closing (same `Idempotency-Key`) still returns that order.
@@ -222,10 +250,11 @@ Error codes the app should handle: `VALIDATION_ERROR`, `INVALID_JSON`, `WEAK_PAS
 `CODE_EXPIRED`, `ALREADY_CONFIRMED` (409), `INVALID_CREDENTIALS` (401),
 `INVALID_REFRESH_TOKEN` (401 → log out locally), `TOO_MANY_REQUESTS` (429),
 `OUT_OF_DELIVERY_AREA` (422), `LOCATION_REQUIRED`, `ADDRESS_LIMIT` (409),
-`BELOW_MINIMUM_ORDER` (422), `PAYMENT_METHOD_UNAVAILABLE`, `SLOT_UNAVAILABLE` (409),
+`BELOW_MINIMUM_ORDER` (422), `PAYMENT_METHOD_UNAVAILABLE`, `KITCHEN_CLOSED` (409, Part 7d),
 `PRODUCT_UNAVAILABLE` (409), `IDEMPOTENCY_CONFLICT` (409), `ORDER_NOT_CANCELLABLE` (409), `CONFLICT` (409),
 `FORBIDDEN` (403), `INVALID_STATUS_CHANGE` (409), `ORDER_CHANGED` (409),
 `UTR_ALREADY_USED` (409), `ORDER_NOT_PAYABLE` (409), `STORE_CLOSED` (409), `PHONE_REQUIRED` (400),
+`NO_REFUND_PENDING` (409, Part 7d),
 `EMAIL_DELIVERY_FAILED` (502), `EMAIL_CHANGE_NOT_SUPPORTED`, `CHALLENGE_REQUIRED`,
 `UNAUTHORIZED`, `NOT_FOUND`, `INTERNAL`.
 
@@ -321,22 +350,27 @@ Addresses need a confirmed account; the script deletes everything it creates:
 ```powershell
 .\backend\scripts\verify-addresses.ps1 -Email you+wmh1@gmail.com
 ```
-Orders need a confirmed account. The script places **one real order** (tomorrow, Morning, cash) and
-cancels it, so one cancelled order stays in that account's history:
+Orders need a confirmed account. The script checks the delivery estimate, places **one real order**
+(cash, for now) and cancels it, so one cancelled order stays in that account's history. Orders are only
+taken 9:00 AM – 8:30 PM IST: run the order scripts in those hours (outside them they only check that the
+server answers `KITCHEN_CLOSED`):
 
 ```powershell
 .\backend\scripts\verify-orders.ps1 -Email you+wmh1@gmail.com
 ```
 
 The kitchen and menu admin need an account in the `admin` group (see below). The script places one
-real order for tomorrow, confirms it, then cancels it from the kitchen; the menu is only read. If a delivery
+real order, confirms it, pushes its estimate 15 minutes later, then cancels it from the kitchen; the menu
+and cooking time are only read (one no-change write each). If a delivery
 boy is on duty, the test order is assigned to him for a moment (he sees it cancelled):
 
 ```powershell
 .\backend\scripts\verify-admin.ps1 -Email owner@example.com -CustomerEmail you+wmh1@gmail.com
 ```
 
-UPI payments (no real money; uses an admin account as both customer and kitchen, and cancels its test order):
+UPI payments (no real money; uses an admin account as both customer and kitchen). The test order is
+"paid" with a made-up UTR, confirmed, cancelled by the customer (refund pending), then recorded as
+"no refund due", because nothing was really paid:
 
 ```powershell
 .\backend\scripts\verify-payments.ps1 -Email owner@example.com
@@ -349,7 +383,7 @@ Store switch (uses an admin account; online orders are off for about 2 seconds, 
 ```
 
 Delivery boys (Part 7c) need an admin account and an account in the `delivery` group with a phone number
-(can be the same account). One real order for tomorrow goes Confirm → assigned → Picked up, then is cancelled;
+(can be the same account). One real order (for now) goes Confirm → assigned → Picked up (after which the customer can no longer cancel), then is cancelled;
 his duty status is put back as it was:
 
 ```powershell

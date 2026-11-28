@@ -28,7 +28,7 @@ import { useApp } from '@/context/AppContext';
 import { CATEGORY_IMAGES, LOGO } from '@/data/mock-data';
 import type { Category, ID, Product } from '@/types';
 import { formatCurrency } from '@/utils/format';
-import { isKitchenOpen } from '@/utils/pricing';
+import { isOrderingOpen } from '@/utils/pricing';
 
 const ALL = 'all';
 
@@ -78,7 +78,7 @@ export default function HomeScreen() {
   const [detailProduct, setDetailProduct] = useState<Product | null>(null);
   const [addressOpen, setAddressOpen] = useState(false);
 
-  const open = isKitchenOpen();
+  const open = isOrderingOpen(); // part 7d: orders 9:00 AM – 8:30 PM IST
   const activeCategoryIds = new Set(categories.map((c) => c.id));
   const q = query.trim().toLowerCase();
 
@@ -195,7 +195,7 @@ export default function HomeScreen() {
         <View style={styles.closedNote}>
           <Icon name="info" size={16} color={Colors.warning} />
           <Text style={styles.closedNoteText}>
-            We deliver {SHOP.hours} — you can pre-order for the next slot.
+            We take online orders {SHOP.orderHours}. Browse the menu and order again from 9 AM.
           </Text>
         </View>
       ) : null}

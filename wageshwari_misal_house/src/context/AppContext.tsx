@@ -137,9 +137,12 @@ const sameLine = (a: CartItem, b: CartItem) =>
   (a.note ?? '').trim() === (b.note ?? '').trim();
 
 export const isTerminalStatus = (s: OrderStatus) => s === 'DELIVERED' || s === 'CANCELLED';
-/** Same rule as the server: before a delivery boy is assigned, and not after a UPI payment was reported. */
-export const isCancellable = (o: Order) =>
-  (o.status === 'PENDING' || o.status === 'PENDING_PAYMENT' || o.status === 'CONFIRMED') && !o.utr;
+/**
+ * Part 7d, same rule as the server (orders.py CANCELLABLE): until the order is out for delivery.
+ * A paid UPI order can be cancelled too; the hotel then refunds it by hand (refund_status).
+ */
+export const CANCELLABLE_STATUSES: OrderStatus[] = ['PENDING', 'PENDING_PAYMENT', 'CONFIRMED', 'PREPARING', 'ASSIGNED'];
+export const isCancellable = (o: Pick<Order, 'status'>) => CANCELLABLE_STATUSES.includes(o.status);
 
 /** A random Idempotency-Key for one checkout (8–64 of A-Z a-z 0-9 _ -). */
 const newCheckoutKey = () =>
@@ -342,6 +345,8 @@ interface AppContextValue {
   reloadStore: () => Promise<void>;
   /** Admin: PATCH /admin/store. Stop (false) or restart (true) online orders. Throws ApiError. */
   setAcceptingOrders: (accepting: boolean, message?: string) => Promise<void>;
+  /** Admin: PATCH /admin/store {prep_minutes}. Base cooking time for new estimates (part 7d). */
+  setPrepMinutes: (minutes: number) => Promise<void>;
   addresses: Address[];
   addressesStatus: LoadStatus;
   addressesError: string | null;
@@ -381,8 +386,8 @@ interface AppContextValue {
   // orders (throw ApiError; screens show `error.message`)
   /** POST /orders with the current cart. Clears the cart on success. */
   placeOrder: (input: PlaceOrderInput) => Promise<Order>;
-  /** POST /orders/:id/cancel. */
-  cancelOrder: (orderId: ID) => Promise<void>;
+  /** POST /orders/:id/cancel. Returns the cancelled order (refund_status set for paid UPI orders). */
+  cancelOrder: (orderId: ID) => Promise<Order>;
   /** POST /orders/:id/payment: "I've paid by UPI" with the UTR. */
   submitPayment: (orderId: ID, utr: string) => Promise<Order>;
   dismissOrderBanner: () => void;
@@ -407,7 +412,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   /**
    * Idempotency-Key of a checkout that hasn't succeeded yet, with the exact body it was sent
    * with. Retrying the same body reuses the key (no double order if the first request did
-   * reach the server); any change to the cart, slot or address gets a fresh key.
+   * reach the server); any change to the cart, payment or address gets a fresh key.
    */
   const checkout = useRef<{ key: string; body: string } | null>(null);
 
@@ -569,6 +574,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const updated = await withAuth((t) => adminApi.setStore(t, accepting, message?.trim() || undefined));
       dispatch({ type: 'STORE_LOADED', store: updated });
     },
+    setPrepMinutes: async (minutes) => {
+      const updated = await withAuth((t) => adminApi.setPrepMinutes(t, minutes));
+      dispatch({ type: 'STORE_LOADED', store: updated });
+    },
     addresses: userAddresses,
     addressesStatus: state.addressesStatus,
     addressesError: state.addressesError,
@@ -686,9 +695,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const order = await withAuth((t) => orderApi.cancel(t, id)); // POST /orders/:id/cancel
         dispatch({ type: 'ORDER_UPDATED', order });
+        return order;
       } catch (e) {
-        // e.g. the kitchen started it meanwhile: show the real status.
-        if (isApiError(e) && e.code === 'ORDER_NOT_CANCELLABLE') loadOrders(true);
+        // e.g. the delivery boy picked it up meanwhile: show the real status.
+        if (isApiError(e) && (e.code === 'ORDER_NOT_CANCELLABLE' || e.code === 'ORDER_CHANGED')) loadOrders(true);
         throw e;
       }
     },

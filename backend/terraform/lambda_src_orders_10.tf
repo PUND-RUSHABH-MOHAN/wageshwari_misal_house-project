@@ -2,6 +2,35 @@
 
 locals {
   lambda_src_orders_10 = <<PYSRC
+            return response(200, to_order(fresh))  # a double tap that raced itself
+        if fresh["status"] in CANCELLABLE:
+            raise ApiError(409, "ORDER_CHANGED", "This order just changed. Pull down to refresh and try again.") from err
+        raise ApiError(409, "ORDER_NOT_CANCELLABLE", _not_cancellable_message(fresh["status"])) from err
+    return response(200, to_order(updated))
+
+
+def needs_refund(item: dict) -> bool:
+    """A UPI order the customer paid, or says they paid (UTR sent): the hotel must refund or check."""
+    return item.get("payment_method") == "online" and (
+        item.get("payment_status") in ("paid", "submitted") or bool(item.get("utr"))
+    )
+
+
+def _not_cancellable_message(status: str) -> str:
+    if status == "OUT_FOR_DELIVERY":
+        return "Your order is already on the way, so it can't be cancelled now. Please call the hotel if needed."
+    if status == "DELIVERED":
+        return "This order has already been delivered."
+    return "This order can't be cancelled now."
+
+
+def submit_payment(event: dict) -> dict:
+    """POST /orders/{id}/payment {utr}: the customer says "I've paid by UPI" and gives the reference.
+
+    Allowed while the order waits for payment, also to correct a mistyped UTR before the kitchen
+    has confirmed it. A UTR can belong to one order only (409 UTR_ALREADY_USED).
+    """
+    user_id = jwt_claims(event)["sub"]
     order_id = (event.get("pathParameters") or {}).get("id", "")
     body = parse_body(event)
     unknown = sorted(set(body) - {"utr"})
@@ -37,35 +66,5 @@ locals {
             }
         },
         {
-            "Update": {
-                "TableName": table.name,
-                "Key": _key(user_id, f"ORDER#{current['id']}"),
-                "UpdateExpression": (
-                    "SET utr = :utr, payment_status = :submitted, payment_submitted_at = :now, updated_at = :now"
-                ),
-                "ConditionExpression": "#s = :pending AND payment_status <> :paid",
-                "ExpressionAttributeNames": {"#s": "status"},
-                "ExpressionAttributeValues": {
-                    ":utr": utr, ":submitted": "submitted", ":now": now, ":pending": "PENDING_PAYMENT", ":paid": "paid",
-                },
-            }
-        },
-    ]
-    if current.get("utr"):  # a correction: free the old, mistyped UTR
-        steps.append({
-            "Delete": {
-                "TableName": table.name,
-                "Key": {"PK": f"UTR#{current['utr']}", "SK": "UTR"},
-                "ConditionExpression": "order_id = :me",
-                "ExpressionAttributeValues": {":me": current["id"]},
-            }
-        })
-    try:
-        table.meta.client.transact_write_items(TransactItems=steps)
-    except ClientError as err:
-        if err.response["Error"]["Code"] != "TransactionCanceledException":
-            raise
-        reasons = [r.get("Code") for r in err.response.get("CancellationReasons", [])]
-        if reasons and reasons[0] == "ConditionalCheckFailed":
 PYSRC
 }

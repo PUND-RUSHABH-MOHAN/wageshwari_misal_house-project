@@ -27,6 +27,7 @@ import json
 from typing import Any
 
 import delivery_boys
+import eta
 import orders
 import users
 from common import ApiError, _json_default, dispatch, groups_from_claims, jwt_claims, parse_body, response
@@ -56,7 +57,8 @@ def to_delivery_order(item: dict) -> dict:
         "order_number": item["order_number"],
         "status": item["status"],
         "delivery_date": item["delivery_date"],
-        "slot_label": item["slot_label"],
+        "slot_label": item.get("slot_label", ""),  # orders from before part 7d only
+        "estimated_delivery_at": item.get("estimated_delivery_at"),
         "total": int(item["total"]),
         "payment_method": item.get("payment_method"),
         "payment_status": item.get("payment_status"),
@@ -71,8 +73,5 @@ def to_delivery_order(item: dict) -> dict:
         out["address"] = {
             **{k: snap[k] for k in ("label", "line1", "line2", "landmark", "city", "pincode") if snap.get(k)},
             "state": delivery_boys.STATE,
-            "latitude": snap.get("latitude"),
-            "longitude": snap.get("longitude"),
-        }
 PYSRC
 }

@@ -16,6 +16,7 @@ import { adminApi, errorMessage } from '@/services/api';
 import { withAuth } from '@/services/session';
 import type { AdminOrder, DeliveryBoy } from '@/types';
 import { formatPhone } from '@/utils/format';
+import { istClockTime } from '@/utils/pricing';
 
 export function AssignSheet({
   order,
@@ -78,7 +79,13 @@ export function AssignSheet({
       visible={order !== null}
       onClose={onClose}
       title={current ? 'Reassign delivery' : 'Assign a delivery boy'}
-      subtitle={order ? `${order.order_number} · ${order.slot_label}` : undefined}
+      subtitle={
+        order
+          ? `${order.order_number} · ${
+              order.estimated_delivery_at ? `deliver by ${istClockTime(order.estimated_delivery_at)}` : order.slot_label ?? ''
+            }`
+          : undefined
+      }
       footer={<Button title="Close" variant="ghost" onPress={onClose} />}>
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {boys === null && !error ? (

@@ -1,6 +1,7 @@
 /**
  * One order on the Kitchen board (admins only): what to cook, who it's for, who delivers it,
  * and the one button that moves it on (part 7c: Confirm -> auto-assign -> Picked up -> Delivered).
+ * Part 7d: the delivery estimate (with "Delay"), and the hand-made refund of cancelled UPI orders.
  */
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -11,7 +12,8 @@ import { Colors, Radius, Shadow, Spacing } from '@/constants/theme';
 import type { AdminOrder, OrderStatus } from '@/types';
 import { formatAddress, formatCurrency, formatPhone, SPICE_LABELS } from '@/utils/format';
 import { callPhone, openMapAt } from '@/utils/maps';
-import { istClockTime } from '@/utils/pricing';
+import { hasLiveEstimate, REFUND_LABELS } from '@/utils/eta';
+import { istClockTime, minutesUntil } from '@/utils/pricing';
 
 /**
  * The single forward step the server allows from each status. CONFIRMED has none: it needs a
@@ -35,6 +37,8 @@ export function KitchenOrderCard({
   onNext,
   onCancel,
   onAssign,
+  onDelay,
+  onRefund,
 }: {
   order: AdminOrder;
   /** A status change for this order is in flight. */
@@ -43,6 +47,10 @@ export function KitchenOrderCard({
   onCancel: () => void;
   /** Open the delivery boy picker (assign / reassign). */
   onAssign: () => void;
+  /** Part 7d: push the estimate later. */
+  onDelay?: () => void;
+  /** Part 7d: record the refund of a cancelled UPI order. */
+  onRefund?: () => void;
 }) {
   const a = order.address_snapshot;
   const next = NEXT_STEP[order.status];
@@ -50,16 +58,45 @@ export function KitchenOrderCard({
   const collectCash = order.payment_method === 'cod' && order.payment_status !== 'paid' && !done;
   const boy = order.delivery_boy;
   const canReassign = order.status === 'ASSIGNED' || order.status === 'PREPARING';
+  const eta = hasLiveEstimate(order) ? order.estimated_delivery_at! : null;
+  const overdue = eta !== null && minutesUntil(eta) === 0;
 
   return (
     <View style={[styles.card, done && styles.cardDone]}>
       <View style={styles.headRow}>
         <View style={styles.flex}>
           <Text style={styles.orderNo}>{order.order_number}</Text>
-          <Text style={styles.meta}>Placed {istClockTime(order.created_at)}</Text>
+          <Text style={styles.meta}>
+            Placed {istClockTime(order.created_at)}
+            {order.slot_label ? ` · ${order.slot_label}` : ''}
+          </Text>
         </View>
         <StatusBadge status={order.status} />
       </View>
+
+      {/* Part 7d: when the customer expects it */}
+      {eta ? (
+        <View style={[styles.eta, overdue && styles.etaLate]}>
+          <Icon name="clock" size={16} color={overdue ? Colors.danger : Colors.primaryDark} />
+          <View style={styles.flex}>
+            <Text style={[styles.etaText, overdue && styles.etaTextLate]}>
+              Deliver by {istClockTime(eta)}
+              {overdue ? ' · late' : ` · ${minutesUntil(eta)} min left`}
+            </Text>
+            {order.delay_minutes ? (
+              <Text style={styles.meta}>
+                {order.delay_minutes} min later than first promised
+                {order.delay_reason ? ` · ${order.delay_reason}` : ''}
+              </Text>
+            ) : null}
+          </View>
+          {onDelay ? (
+            <Pressable onPress={onDelay} hitSlop={8} disabled={busy} accessibilityRole="button">
+              <Text style={styles.link}>Delay</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* UPI orders: check the money before cooking */}
       {order.status === 'PENDING_PAYMENT' ? (
@@ -178,7 +215,28 @@ export function KitchenOrderCard({
         <Text style={styles.cancelled}>
           {order.cancelled_by === 'kitchen'
             ? `Cancelled by the kitchen: ${order.cancel_reason ?? ''}`
-            : 'Cancelled by the customer'}
+            : order.cancelled_by === 'system'
+              ? `Cancelled automatically: ${order.cancel_reason ?? 'not paid in time'}`
+              : 'Cancelled by the customer'}
+          {order.cancelled_at ? ` · ${istClockTime(order.cancelled_at)}` : ''}
+        </Text>
+      ) : null}
+
+      {/* Part 7d: a paid (or UTR-sent) UPI order was cancelled: the hotel refunds by hand */}
+      {order.refund_status === 'pending' ? (
+        <View style={styles.refund}>
+          <Icon name="upi" size={18} color={Colors.info} />
+          <View style={styles.flex}>
+            <Text style={styles.refundTitle}>Refund {formatCurrency(order.total)} by UPI</Text>
+            <Text style={styles.meta}>{order.utr ? `Customer's UTR ${order.utr}` : 'Check your UPI app for this payment'}</Text>
+          </View>
+          {onRefund ? <Button title="Refund" onPress={onRefund} style={styles.refundBtn} /> : null}
+        </View>
+      ) : order.refund_status ? (
+        <Text style={styles.meta}>
+          {REFUND_LABELS[order.refund_status]}
+          {order.refund_reference ? ` · ref ${order.refund_reference}` : ''}
+          {order.refunded_at ? ` · ${istClockTime(order.refunded_at)}` : ''}
         </Text>
       ) : null}
 
@@ -272,4 +330,26 @@ const styles = StyleSheet.create({
     padding: Spacing.md,
   },
   noBoyText: { flex: 1, fontSize: 13, fontWeight: '700', color: Colors.warning },
+  eta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.primarySoft,
+    borderRadius: Radius.md,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+  },
+  etaLate: { backgroundColor: Colors.dangerSoft },
+  etaText: { fontSize: 14, fontWeight: '800', color: Colors.primaryDark },
+  etaTextLate: { color: Colors.danger },
+  refund: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.infoSoft,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+  },
+  refundTitle: { fontSize: 14, fontWeight: '800', color: Colors.info },
+  refundBtn: { paddingHorizontal: Spacing.lg },
 });

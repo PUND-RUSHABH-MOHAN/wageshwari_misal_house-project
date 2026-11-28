@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Checks the deployed store switch (Part 7b) with an account in the Cognito `admin` group.
+  Checks the deployed store switch (Part 7b) and the cooking-time setting (part 7d) with an
+  account in the Cognito `admin` group.
   It switches online orders OFF for a few seconds (message "Verify script test"), checks that
   GET /store and POST /orders see it, then switches them back ON. If the store is already
   closed when you run it, it leaves it closed and only does the read-only checks.
@@ -67,12 +68,12 @@ function Login([string] $Who) {
 }
 
 $istNow = [DateTime]::UtcNow.AddHours(5.5)
-$tomorrow = $istNow.AddDays(1).ToString("yyyy-MM-dd")
 
 Write-Host "--- Public status ---"
 $before = Invoke-Api GET "/store"
 Check "GET /store (no login)" $before 200 -Extra "accepting_orders=$($before.Body.accepting_orders), hours $($before.Body.opens_at)-$($before.Body.closes_at)"
 Assert "hours are 09:00 - 21:00" ($before.Body.opens_at -eq "09:00" -and $before.Body.closes_at -eq "21:00")
+Assert "last order 20:30, cooking time 5-90 min (part 7d)" (($before.Body.last_order_at -eq "20:30") -and ($before.Body.prep_minutes -ge 5) -and ($before.Body.prep_minutes -le 90)) "prep=$($before.Body.prep_minutes) min"
 $wasOpen = [bool] $before.Body.accepting_orders
 
 $admin = Login $Email
@@ -93,6 +94,8 @@ Check "accepting_orders missing is refused" (Invoke-Api PATCH "/admin/store" @{ 
 Check "accepting_orders as text is refused" (Invoke-Api PATCH "/admin/store" @{ accepting_orders = "no" } -Token $t) 400 "VALIDATION_ERROR"
 Check "message over 120 chars is refused" (Invoke-Api PATCH "/admin/store" @{ accepting_orders = $false; message = ("x" * 121) } -Token $t) 400 "VALIDATION_ERROR"
 Check "unknown field is refused" (Invoke-Api PATCH "/admin/store" @{ accepting_orders = $true; open = $true } -Token $t) 400 "VALIDATION_ERROR"
+Check "cooking time 91 min is refused" (Invoke-Api PATCH "/admin/store" @{ prep_minutes = 91 } -Token $t) 400 "VALIDATION_ERROR"
+Check "cooking time as text is refused" (Invoke-Api PATCH "/admin/store" @{ prep_minutes = "20" } -Token $t) 400 "VALIDATION_ERROR"
 
 if (-not $wasOpen) {
   Write-Host "`nThe store is closed right now (`"$($before.Body.message)`"), so the stop/start test is skipped." -ForegroundColor Yellow
@@ -106,7 +109,7 @@ if (-not $wasOpen) {
     Assert "GET /store shows closed + message" ((-not $closed.Body.accepting_orders) -and $closed.Body.message -eq "Verify script test") "message: $($closed.Body.message)"
     # Any well-formed order: the switch is checked before the address and dishes.
     $order = @{
-      address_id = "adr_0000000000000000"; delivery_date = $tomorrow; slot_label = "Morning 10:00 - 11:00 AM"
+      address_id = "adr_0000000000000000"
       payment_method = "cod"; items = @(@{ product_id = "prd_chaha"; quantity = 1 })
     }
     Check "POST /orders while closed" (Invoke-Api POST "/orders" $order -Token $t -Key ("verify-" + [Guid]::NewGuid().ToString("N"))) 409 "STORE_CLOSED"
@@ -115,6 +118,7 @@ if (-not $wasOpen) {
     Check "PATCH /admin/store (start again)" $start 200
     $open = Invoke-Api GET "/store"
     Assert "GET /store shows open, message cleared" ($open.Body.accepting_orders -and $open.Body.message -eq "") "accepting_orders=$($open.Body.accepting_orders)"
+    Assert "cooking time kept through stop/start" ($open.Body.prep_minutes -eq $before.Body.prep_minutes) "$($open.Body.prep_minutes) min"
     if (-not $open.Body.accepting_orders) {
       Write-Host "Online orders are still OFF. Turn them on in the Kitchen tab." -ForegroundColor Red
     }
